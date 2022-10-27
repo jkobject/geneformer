@@ -15,4 +15,15 @@ The rank value encoding of each single cell’s transcriptome then proceeds thro
 During pretraining, Geneformer gained a fundamental understanding of network dynamics, encoding network hierarchy in the model’s attention weights in a completely self-supervised manner. Fine-tuning Geneformer towards a diverse panel of downstream tasks relevant to chromatin and network dynamics using limited task-specific data demonstrated that Geneformer consistently boosted predictive accuracy. Applied to disease modeling with limited patient data, Geneformer identified candidate therapeutic targets. Overall, Geneformer represents an invaluable pretrained model from which fine-tuning towards a broad range of downstream applications can be pursued to accelerate discovery of key network regulators and candidate therapeutic targets.
 
 # Application
-The pretrained Geneformer model can be used directly, for example for in silico deletion analysis, but is best used by fine-tuning towards the relevant downstream task, such as gene or cell state classification.
+The pretrained Geneformer model can be used directly, for example for in silico deletion analysis, or by fine-tuning towards the relevant downstream task, such as gene or cell state classification.
+
+# Installation
+In addition to the pretrained model, contained herein are functions for tokenizing and collating data specific to single cell transcriptomics. To install:
+
+```bash
+git clone https://huggingface.co/ctheodoris/Geneformer
+cd Geneformer
+pip install .
+```
+
+For usage, see [examples](https://huggingface.co/ctheodoris/Geneformer/tree/main/examples) for pretraining and fine-tuning. Please note that GPU resources are required for efficient usage of Geneformer.
