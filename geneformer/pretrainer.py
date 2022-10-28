@@ -1,7 +1,7 @@
 """
-Geneformer trainer and collator.
+Geneformer precollator and pretrainer.
 
-Huggingface trainer and data collator modified to accommodate single-cell transcriptomics data.
+Huggingface data collator and trainer modified to accommodate single-cell transcriptomics data.
 """
 import collections
 import math
@@ -589,7 +589,7 @@ class GeneformerPreCollator(SpecialTokensMixin):
         return len(self.token_dictionary)
 
 
-class GeneformerTrainer(Trainer):
+class GeneformerPretrainer(Trainer):
     def __init__(self, *args, **kwargs):
         data_collator = kwargs.get("data_collator")
         token_dictionary = kwargs.get("token_dictionary")

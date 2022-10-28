@@ -2,8 +2,8 @@
 Geneformer tokenizer.
 
 Usage:
-  from geneformer.tokenizer import Tokenizer
-  tk = Tokenizer({"cell_type": "cell_type", "organ_major": "organ_major"}, nproc=4)
+  from geneformer import TranscriptomeTokenizer
+  tk = TranscriptomeTokenizer({"cell_type": "cell_type", "organ_major": "organ_major"}, nproc=4)
   tk.tokenize_data("loom_data_directory", "output_directory", "output_prefix")
 """
 
@@ -32,7 +32,7 @@ def tokenize_cell(gene_vector, gene_tokens):
     return sentence_tokens
 
 
-class Tokenizer:
+class TranscriptomeTokenizer:
     def __init__(
         self,
         custom_attr_name_dict,

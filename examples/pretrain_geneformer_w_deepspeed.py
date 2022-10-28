@@ -23,7 +23,7 @@ import torch
 from datasets import load_from_disk
 from transformers import BertConfig, BertForMaskedLM, TrainingArguments
 
-from .trainer import GeneformerTrainer
+from geneformer import GeneformerPretrainer
 
 seed_num = 0
 random.seed(seed_num)
@@ -149,7 +149,7 @@ training_args = TrainingArguments(**training_args)
 print("Starting training.")
 
 # define the trainer
-trainer = GeneformerTrainer(
+trainer = GeneformerPretrainer(
     model=model,
     args=training_args,
     # pretraining corpus (e.g. https://huggingface.co/datasets/ctheodoris/Genecorpus-30M/tree/main/genecorpus_30M_2048.dataset)
