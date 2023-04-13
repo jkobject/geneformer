@@ -1,3 +1,6 @@
+---
+datasets: ctheodoris/Genecorpus-30M
+---
 # Geneformer
 Geneformer is a transformer model pretrained on a large-scale corpus of ~30 million single cell transcriptomes to enable context-aware predictions in settings with limited data in network biology. 
 
