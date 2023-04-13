@@ -108,7 +108,8 @@ class TranscriptomeTokenizer:
                 loom_file_path
             )
             tokenized_cells += file_tokenized_cells
-            cell_metadata.update(file_cell_metadata)
+            for k in cell_metadata.keys():
+                cell_metadata[k] += file_cell_metadata[k]
 
         return tokenized_cells, cell_metadata
 
