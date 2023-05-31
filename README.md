@@ -21,7 +21,7 @@ During pretraining, Geneformer gained a fundamental understanding of network dyn
 The pretrained Geneformer model can be used directly for zero-shot learning, for example for in silico perturbation analysis, or by fine-tuning towards the relevant downstream task, such as gene or cell state classification.
 
 # Installation
-In addition to the pretrained model, contained herein are functions for tokenizing and collating data specific to single cell transcriptomics. To install:
+In addition to the pretrained model, contained herein are functions for tokenizing and collating data specific to single cell transcriptomics, pretraining the model, and performing in silico pertrubation with either the pretrained or fine-tuned models. To install:
 
 ```bash
 git clone https://huggingface.co/ctheodoris/Geneformer
