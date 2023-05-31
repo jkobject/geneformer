@@ -377,7 +377,7 @@ class GeneformerPreCollator(SpecialTokensMixin):
                 return_tensors = "tf" if return_tensors is None else return_tensors
             elif is_torch_available() and _is_torch(first_element):
                 return_tensors = "pt" if return_tensors is None else return_tensors
-            elif isinstance(first_element, np.ndarray):
+            if isinstance(first_element, np.ndarray):
                 return_tensors = "np" if return_tensors is None else return_tensors
             else:
                 raise ValueError(
@@ -387,6 +387,7 @@ class GeneformerPreCollator(SpecialTokensMixin):
 
             for key, value in encoded_inputs.items():
                 encoded_inputs[key] = to_py_obj(value)
+                
 
         # Convert padding_strategy in PaddingStrategy
         padding_strategy, _, max_length, _ = self._get_padding_truncation_strategies(
