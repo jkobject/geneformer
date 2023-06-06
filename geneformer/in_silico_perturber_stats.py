@@ -19,6 +19,7 @@ import logging
 import numpy as np
 import pandas as pd
 import pickle
+import random
 import statsmodels.stats.multitest as smt
 from pathlib import Path
 from scipy.stats import ranksums
@@ -66,8 +67,7 @@ def n_detections(token, dict_list):
 def get_fdr(pvalues):
     return list(smt.multipletests(pvalues, alpha=0.05, method="fdr_bh")[1])
 
-def isp_stats(cos_sims_df, dict_list, cell_states_to_model):
-    
+def isp_stats(cos_sims_df, dict_list):
     random_tuples = []
     for i in trange(cos_sims_df.shape[0]):
         token = cos_sims_df["Gene"][i]
@@ -129,6 +129,40 @@ def isp_stats(cos_sims_df, dict_list, cell_states_to_model):
     cos_sims_full_df["Goal_end_FDR"] = get_fdr(list(cos_sims_full_df["Goal_end_vs_random_pval"]))
     cos_sims_full_df["Alt_end_FDR"] = get_fdr(list(cos_sims_full_df["Alt_end_vs_random_pval"]))
     
+    return cos_sims_full_df
+
+def isp_stats_vs_null(cos_sims_df, dict_list, null_dict_list):
+    cos_sims_full_df = cos_sims_df.copy()
+
+    cos_sims_full_df["Test_avg_shift"] = np.zeros(cos_sims_df.shape[0], dtype=float)
+    cos_sims_full_df["Null_avg_shift"] = np.zeros(cos_sims_df.shape[0], dtype=float)
+    cos_sims_full_df["Test_v_null_avg_shift"] = np.zeros(cos_sims_df.shape[0], dtype=float)
+    cos_sims_full_df["Test_v_null_pval"] = np.zeros(cos_sims_df.shape[0], dtype=float)
+    cos_sims_full_df["Test_v_null_FDR"] = np.zeros(cos_sims_df.shape[0], dtype=float)
+    cos_sims_full_df["N_Detections_test"] = np.zeros(cos_sims_df.shape[0], dtype="uint32")
+    cos_sims_full_df["N_Detections_null"] = np.zeros(cos_sims_df.shape[0], dtype="uint32")
+    
+    for i in trange(cos_sims_df.shape[0]):
+        token = cos_sims_df["Gene"][i]
+        test_shifts = []
+        null_shifts = []
+        
+        for dict_i in dict_list:
+            token_tuples += dict_i.get((token, "cell_emb"),[])
+
+        for dict_i in null_dict_list:
+            null_tuples += dict_i.get((token, "cell_emb"),[])
+        
+        cos_sims_full_df.loc[i, "Test_avg_shift"] = np.mean(test_shifts)
+        cos_sims_full_df.loc[i, "Null_avg_shift"] = np.mean(null_shifts)
+        cos_sims_full_df.loc[i, "Test_v_null_avg_shift"] = np.mean(test_shifts)-np.mean(null_shifts)       
+        cos_sims_full_df.loc[i, "Test_v_null_pval"] = ranksums(test_shifts,
+            null_shifts, nan_policy="omit").pvalue
+
+        cos_sims_full_df.loc[i, "N_Detections_test"] = len(test_shifts)
+        cos_sims_full_df.loc[i, "N_Detections_null"] = len(null_shifts)
+
+    cos_sims_full_df["Test_v_null_FDR"] = get_fdr(cos_sims_full_df["Test_v_null_pval"])
     return cos_sims_full_df
 
 class InSilicoPerturberStats:
@@ -255,17 +289,16 @@ class InSilicoPerturberStats:
         output_prefix : str
             Prefix for output .dataset
         """
-        
+
+        if self.mode not in ["goal_state_shift", "vs_null"]:
+            logger.error(
+                "Currently, only modes available are stats for goal_state_shift \
+                    and comparing vs a null distribution.")
+            raise
+
         self.gene_token_id_dict = invert_dict(self.gene_token_dict)
         self.gene_id_name_dict = invert_dict(self.gene_name_id_dict)
-        
-        if self.mode == "goal_state_shift":
-            dict_list = read_dictionaries(input_data_directory,"cell")
-        else:
-            logger.error(
-                    "Currently, only mode available is stats for goal_state_shift.")
-            raise
-        
+
         # obtain total gene list
         gene_list = get_gene_list(dict_list)
         
@@ -278,18 +311,24 @@ class InSilicoPerturberStats:
                                                            self.gene_token_id_dict[genes] \
                                                            for genes in gene_list]}, \
                                              index=[i for i in range(len(gene_list))])
-        
-        # # add ENSEMBL ID for genes
-        # cos_sims_df_initial["Ensembl_ID"] = [self.gene_token_id_dict[genes[1]] if isinstance(genes,tuple) else self.gene_token_id_dict[genes] for genes in list(cos_sims_df_initial["Gene"])]
-        
-        cos_sims_df = isp_stats(cos_sims_df_initial, dict_list, self.cell_states_to_model)
-        
-        # quantify number of detections of each gene
-        cos_sims_df["N_Detections"] = [n_detections(i, dict_list) for i in cos_sims_df["Gene"]]
-        
-        # sort by shift to desired state
-        cos_sims_df = cos_sims_df.sort_values(by=["Shift_from_goal_end",
-                                                  "Goal_end_FDR"])
+
+        dict_list = read_dictionaries(input_data_directory, "cell")
+        if self.mode == "goal_state_shift":
+            cos_sims_df = isp_stats(cos_sims_df_initial, dict_list)
+            
+            # quantify number of detections of each gene
+            cos_sims_df["N_Detections"] = [n_detections(i, dict_list) for i in cos_sims_df["Gene"]]
+            
+            # sort by shift to desired state
+            cos_sims_df = cos_sims_df.sort_values(by=["Shift_from_goal_end",
+                                                      "Goal_end_FDR"])
+        elif self.mode == "vs_null":
+            dict_list = read_dictionaries(input_data_directory, "cell")
+            null_dict_list = read_dictionaries(null_dist_data_directory, "cell")
+            cos_sims_df = isp_stats_vs_null(cos_sims_df_initial, dict_list,
+                null_dict_list)
+            cos_sims_df = cos_sims_df.sort_values(by=["Test_v_null_avg_shift",
+                                                      "Test_v_null_FDR"])
 
         # save perturbation stats to output_path
         output_path = (Path(output_directory) / output_prefix).with_suffix(".csv")
