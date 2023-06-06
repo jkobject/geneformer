@@ -67,7 +67,8 @@ def n_detections(token, dict_list):
 def get_fdr(pvalues):
     return list(smt.multipletests(pvalues, alpha=0.05, method="fdr_bh")[1])
 
-def isp_stats(cos_sims_df, dict_list):
+# stats comparing cos sim shifts towards goal state of test perturbations vs random perturbations
+def isp_stats_to_goal_state(cos_sims_df, dict_list):
     random_tuples = []
     for i in trange(cos_sims_df.shape[0]):
         token = cos_sims_df["Gene"][i]
@@ -131,6 +132,7 @@ def isp_stats(cos_sims_df, dict_list):
     
     return cos_sims_full_df
 
+# stats comparing cos sim shifts of test perturbations vs null distribution
 def isp_stats_vs_null(cos_sims_df, dict_list, null_dict_list):
     cos_sims_full_df = cos_sims_df.copy()
 
@@ -293,7 +295,7 @@ class InSilicoPerturberStats:
         if self.mode not in ["goal_state_shift", "vs_null"]:
             logger.error(
                 "Currently, only modes available are stats for goal_state_shift \
-                    and comparing vs a null distribution.")
+                    and vs_null (comparing to null distribution).")
             raise
 
         self.gene_token_id_dict = invert_dict(self.gene_token_dict)
@@ -314,7 +316,7 @@ class InSilicoPerturberStats:
 
         dict_list = read_dictionaries(input_data_directory, "cell")
         if self.mode == "goal_state_shift":
-            cos_sims_df = isp_stats(cos_sims_df_initial, dict_list)
+            cos_sims_df = isp_stats_to_goal_state(cos_sims_df_initial, dict_list)
             
             # quantify number of detections of each gene
             cos_sims_df["N_Detections"] = [n_detections(i, dict_list) for i in cos_sims_df["Gene"]]
