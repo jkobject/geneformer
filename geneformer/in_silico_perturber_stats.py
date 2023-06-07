@@ -150,10 +150,10 @@ def isp_stats_vs_null(cos_sims_df, dict_list, null_dict_list):
         null_shifts = []
         
         for dict_i in dict_list:
-            token_tuples += dict_i.get((token, "cell_emb"),[])
+            test_shifts += dict_i.get((token, "cell_emb"),[])
 
         for dict_i in null_dict_list:
-            null_tuples += dict_i.get((token, "cell_emb"),[])
+            null_shifts += dict_i.get((token, "cell_emb"),[])
         
         cos_sims_full_df.loc[i, "Test_avg_shift"] = np.mean(test_shifts)
         cos_sims_full_df.loc[i, "Null_avg_shift"] = np.mean(null_shifts)
@@ -302,6 +302,7 @@ class InSilicoPerturberStats:
         self.gene_id_name_dict = invert_dict(self.gene_name_id_dict)
 
         # obtain total gene list
+        dict_list = read_dictionaries(input_data_directory, "cell")
         gene_list = get_gene_list(dict_list)
         
         # initiate results dataframe
@@ -314,7 +315,6 @@ class InSilicoPerturberStats:
                                                            for genes in gene_list]}, \
                                              index=[i for i in range(len(gene_list))])
 
-        dict_list = read_dictionaries(input_data_directory, "cell")
         if self.mode == "goal_state_shift":
             cos_sims_df = isp_stats_to_goal_state(cos_sims_df_initial, dict_list)
             
