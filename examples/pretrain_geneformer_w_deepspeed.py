@@ -137,9 +137,8 @@ training_args = {
     "weight_decay": weight_decay,
     "per_device_train_batch_size": geneformer_batch_size,
     "num_train_epochs": epochs,
-    "load_best_model_at_end": True,
     "save_strategy": "steps",
-    "save_steps": num_examples / geneformer_batch_size / 8,  # 8 saves per epoch
+    "save_steps": np.floor(num_examples / geneformer_batch_size / 8),  # 8 saves per epoch
     "logging_steps": 1000,
     "output_dir": training_output_dir,
     "logging_dir": logging_dir,

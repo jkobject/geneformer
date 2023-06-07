@@ -106,19 +106,23 @@ class TensorType(ExplicitEnum):
 
 class GeneformerPreCollator(SpecialTokensMixin):
     def __init__(self, *args, **kwargs) -> None:
+        
+        super().__init__(mask_token = "<mask>", pad_token = "<pad>")
+        
         self.token_dictionary = kwargs.get("token_dictionary")
-        self.mask_token = "<mask>"
-        self.mask_token_id = self.token_dictionary.get("<mask>")
-        self.pad_token = "<pad>"
-        self.pad_token_id = self.token_dictionary.get("<pad>")
+        # self.mask_token = "<mask>"
+        # self.mask_token_id = self.token_dictionary.get("<mask>")
+        # self.pad_token = "<pad>"
+        # self.pad_token_id = self.token_dictionary.get("<pad>")
         self.padding_side = "right"
-        self.all_special_ids = [
-            self.token_dictionary.get("<mask>"),
-            self.token_dictionary.get("<pad>"),
-        ]
+        # self.all_special_ids = [
+        #     self.token_dictionary.get("<mask>"),
+        #     self.token_dictionary.get("<pad>"),
+        # ]
         self.model_input_names = ["input_ids"]
-
-        super().__init__(*args, **kwargs)
+    
+    def convert_ids_to_tokens(self,value):
+        return self.token_dictionary.get(value)
 
     def _get_padding_truncation_strategies(
         self,
@@ -592,8 +596,8 @@ class GeneformerPreCollator(SpecialTokensMixin):
 
 class GeneformerPretrainer(Trainer):
     def __init__(self, *args, **kwargs):
-        data_collator = kwargs.get("data_collator")
-        token_dictionary = kwargs.get("token_dictionary")
+        data_collator = kwargs.get("data_collator",None)
+        token_dictionary = kwargs.pop("token_dictionary")
 
         if data_collator is None:
             precollator = GeneformerPreCollator(token_dictionary=token_dictionary)
@@ -604,17 +608,17 @@ class GeneformerPretrainer(Trainer):
             )
             kwargs["data_collator"] = data_collator
 
-        super().__init__(*args, **kwargs)
-
         # load previously saved length vector for dataset to speed up LengthGroupedSampler
         # pre-obtained with [dataset[i]["length"] for i in range(len(dataset))]
-        if kwargs.get("example_lengths_file"):
-            with open(kwargs.get("example_lengths_file"), "rb") as f:
+        example_lengths_file = kwargs.pop("example_lengths_file")
+        if example_lengths_file:
+            with open(example_lengths_file, "rb") as f:
                 self.example_lengths = pickle.load(f)
         else:
             raise Exception(
                 "example_lengths_file is required; e.g. https://huggingface.co/datasets/ctheodoris/Genecorpus-30M/tree/main/genecorpus_30M_2048_sorted_lengths.pkl"
             )
+        super().__init__(*args, **kwargs)
 
     # modify LengthGroupedSampler to avoid dataset[length_column_name] hanging
     def _get_train_sampler(self) -> Optional[torch.utils.data.sampler.Sampler]:
@@ -634,7 +638,6 @@ class GeneformerPretrainer(Trainer):
                 lengths = self.example_lengths
             else:
                 lengths = None
-            print(f"Lengths: {len(lengths)}")
             model_input_name = (
                 self.tokenizer.model_input_names[0]
                 if self.tokenizer is not None
@@ -642,16 +645,16 @@ class GeneformerPretrainer(Trainer):
             )
             if self.args.world_size <= 1:
                 return LengthGroupedSampler(
-                    self.train_dataset,
-                    self.args.train_batch_size,
+                    dataset=self.train_dataset,
+                    batch_size=self.args.train_batch_size,
                     lengths=lengths,
                     model_input_name=model_input_name,
                     generator=generator,
                 )
             else:
                 return CustomDistributedLengthGroupedSampler(
-                    self.train_dataset,
-                    self.args.train_batch_size,
+                    dataset=self.train_dataset,
+                    batch_size=self.args.train_batch_size,
                     num_replicas=self.args.world_size,
                     rank=self.args.process_index,
                     lengths=lengths,
@@ -754,7 +757,7 @@ class CustomDistributedLengthGroupedSampler(DistributedLengthGroupedSampler):
         # Deterministically shuffle based on epoch and seed
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
-
+        
         indices = get_length_grouped_indices(self.lengths, self.batch_size, generator=g)
 
         if not self.drop_last:
