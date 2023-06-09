@@ -1,7 +1,7 @@
 """
-Geneformer collator for gene classification.
+Geneformer collator for gene and cell classification.
 
-Huggingface data collator modified to accommodate single-cell transcriptomics data for gene classification.
+Huggingface data collator modified to accommodate single-cell transcriptomics data for gene and cell classification.
 """
 import numpy as np
 import torch
@@ -79,7 +79,7 @@ class TensorType(ExplicitEnum):
     JAX = "jax"
 
     
-class PrecollatorForGeneClassification(SpecialTokensMixin):
+class PrecollatorForGeneAndCellClassification(SpecialTokensMixin):
     mask_token = "<mask>"
     mask_token_id = token_dictionary.get("<mask>")
     pad_token = "<pad>"
@@ -228,6 +228,7 @@ class PrecollatorForGeneClassification(SpecialTokensMixin):
             Dict[str, List[EncodedInput]],
             List[Dict[str, EncodedInput]],
         ],
+        class_type, # options: "gene" or "cell"
         padding: Union[bool, str, PaddingStrategy] = True,
         max_length: Optional[int] = None,
         pad_to_multiple_of: Optional[int] = None,
@@ -345,6 +346,7 @@ class PrecollatorForGeneClassification(SpecialTokensMixin):
         if required_input and not isinstance(required_input[0], (list, tuple)):
             encoded_inputs = self._pad(
                 encoded_inputs,
+                class_type=class_type,
                 max_length=max_length,
                 padding_strategy=padding_strategy,
                 pad_to_multiple_of=pad_to_multiple_of,
@@ -366,6 +368,7 @@ class PrecollatorForGeneClassification(SpecialTokensMixin):
             inputs = dict((k, v[i]) for k, v in encoded_inputs.items())
             outputs = self._pad(
                 inputs,
+                class_type=class_type,
                 max_length=max_length,
                 padding_strategy=padding_strategy,
                 pad_to_multiple_of=pad_to_multiple_of,
@@ -376,12 +379,14 @@ class PrecollatorForGeneClassification(SpecialTokensMixin):
                 if key not in batch_outputs:
                     batch_outputs[key] = []
                 batch_outputs[key].append(value)
-
+        if class_type == "cell":
+            del batch_outputs["label"]
         return BatchEncoding(batch_outputs, tensor_type=return_tensors)
 
     def _pad(
         self,
         encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
+        class_type, # options: "gene" or "cell"
         max_length: Optional[int] = None,
         padding_strategy: PaddingStrategy = PaddingStrategy.LONGEST,
         pad_to_multiple_of: Optional[int] = None,
@@ -434,7 +439,8 @@ class PrecollatorForGeneClassification(SpecialTokensMixin):
                 if "special_tokens_mask" in encoded_inputs:
                     encoded_inputs["special_tokens_mask"] = encoded_inputs["special_tokens_mask"] + [1] * difference
                 encoded_inputs[self.model_input_names[0]] = required_input + [self.pad_token_id] * difference
-                encoded_inputs["labels"] = encoded_inputs["labels"] + [-100] * difference
+                if class_type == "gene":
+                    encoded_inputs["labels"] = encoded_inputs["labels"] + [-100] * difference
             elif self.padding_side == "left":
                 if return_attention_mask:
                     encoded_inputs["attention_mask"] = [0] * difference + [1] * len(required_input)
@@ -445,13 +451,12 @@ class PrecollatorForGeneClassification(SpecialTokensMixin):
                 if "special_tokens_mask" in encoded_inputs:
                     encoded_inputs["special_tokens_mask"] = [1] * difference + encoded_inputs["special_tokens_mask"]
                 encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
-                encoded_inputs["labels"] = [-100] * difference + encoded_inputs["labels"]
+                if class_type == "gene":
+                    encoded_inputs["labels"] = [-100] * difference + encoded_inputs["labels"]
             else:
                 raise ValueError("Invalid padding strategy:" + str(self.padding_side))
         elif return_attention_mask and "attention_mask" not in encoded_inputs:
             encoded_inputs["attention_mask"] = [1] * len(required_input)
-        
-#         check_output_once(encoded_inputs)
         
         return encoded_inputs
 
@@ -513,6 +518,7 @@ class PrecollatorForGeneClassification(SpecialTokensMixin):
     def __len__(self):
         return len(token_dictionary)
 
+
 # collator functions
 
 class DataCollatorForGeneClassification(DataCollatorForTokenClassification):
@@ -540,22 +546,57 @@ class DataCollatorForGeneClassification(DataCollatorForTokenClassification):
             The id to use when padding the labels (-100 will be automatically ignore by PyTorch loss functions).
     """
 
-    tokenizer: PrecollatorForGeneClassification()
+    tokenizer = PrecollatorForGeneAndCellClassification()
+    class_type = "gene"
     padding: Union[bool, str, PaddingStrategy] = True
     max_length: Optional[int] = None
     pad_to_multiple_of: Optional[int] = None
     label_pad_token_id: int = -100
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(
+            tokenizer=self.tokenizer,
+            padding=self.padding,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            label_pad_token_id=self.label_pad_token_id,
+            *args, **kwargs)
 
-    def __call__(self, features):
+    def _prepare_batch(self, features):
         label_name = "label" if "label" in features[0].keys() else "labels"
         labels = [feature[label_name] for feature in features] if label_name in features[0].keys() else None
         batch = self.tokenizer.pad(
             features,
+            class_type=self.class_type,
             padding=self.padding,
             max_length=self.max_length,
             pad_to_multiple_of=self.pad_to_multiple_of,
             return_tensors="pt",
         )
+        return batch
+    
+    def __call__(self, features):
+        batch = self._prepare_batch(features)
 
         batch = {k: torch.tensor(v, dtype=torch.int64) for k, v in batch.items()}
+        return batch
+
+    
+class DataCollatorForCellClassification(DataCollatorForGeneClassification):
+
+    class_type = "cell"
+
+    def _prepare_batch(self, features):
+        
+        batch = super()._prepare_batch(features)
+        
+        # Special handling for labels.
+        # Ensure that tensor is created with the correct type
+        # (it should be automatically the case, but let's make sure of it.)
+        first = features[0]
+        if "label" in first and first["label"] is not None:
+            label = first["label"].item() if isinstance(first["label"], torch.Tensor) else first["label"]
+            dtype = torch.long if isinstance(label, int) else torch.float
+            batch["labels"] = torch.tensor([f["label"] for f in features], dtype=dtype)
+            
         return batch
