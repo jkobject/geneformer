@@ -91,7 +91,7 @@ class TranscriptomeTokenizer:
         output_prefix : str
             Prefix for output .dataset
         """
-        tokenized_cells, cell_metadata = self.tokenize_files(loom_data_directory)
+        tokenized_cells, cell_metadata = self.tokenize_files(Path(loom_data_directory))
         tokenized_dataset = self.create_dataset(tokenized_cells, cell_metadata)
 
         output_path = (Path(output_directory) / output_prefix).with_suffix(".dataset")
@@ -137,7 +137,7 @@ class TranscriptomeTokenizer:
             # define coordinates of cells passing filters for inclusion (e.g. QC)
             try:
                 data.ca["filter_pass"]
-            except NameError:
+            except AttributeError:
                 var_exists = False
             else:
                 var_exists = True
