@@ -1,6 +1,13 @@
 """
 Geneformer tokenizer.
 
+Input data:
+Required format: raw counts scRNAseq data without feature selection as .loom file
+Required row (gene) attribute: "ensembl_id"; Ensembl ID for each gene
+Required col (cell) attribute: "n_counts"; total read counts in that cell
+Optional col (cell) attribute: "filter_pass"; binary indicator of whether cell should be tokenized based on user-defined filtering criteria
+Optional col (cell) attributes: any other cell metadata can be passed on to the tokenized dataset as a custom attribute dictionary as shown below
+
 Usage:
   from geneformer import TranscriptomeTokenizer
   tk = TranscriptomeTokenizer({"cell_type": "cell_type", "organ_major": "organ_major"}, nproc=4)
