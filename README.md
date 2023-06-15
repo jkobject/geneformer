@@ -1,5 +1,6 @@
 ---
 datasets: ctheodoris/Genecorpus-30M
+license: apache-2.0
 ---
 # Geneformer
 Geneformer is a foundation transformer model pretrained on a large-scale corpus of ~30 million single cell transcriptomes to enable context-aware predictions in settings with limited data in network biology. 
