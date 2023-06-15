@@ -484,12 +484,13 @@ class InSilicoPerturber:
                     "quartile to shift by must be specified.")
                 raise
         
-        for key,value in self.filter_data.items():
-            if type(value) != list:
-                self.filter_data[key] = [value]
-                logger.warning(
-                    "Values in filter_data dict must be lists. " \
-                    f"Changing {key} value to list ([{value}]).")
+        if self.filter_data is not None:
+            for key,value in self.filter_data.items():
+                if type(value) != list:
+                    self.filter_data[key] = [value]
+                    logger.warning(
+                        "Values in filter_data dict must be lists. " \
+                        f"Changing {key} value to list ([{value}]).")
 
     def perturb_data(self, 
                      model_directory,
@@ -543,14 +544,15 @@ class InSilicoPerturber:
     # load data and filter by defined criteria
     def load_and_filter(self, input_data_file):
         data = load_from_disk(input_data_file)
-        for key,value in self.filter_data.items():
-            def filter_data(example):
-                return example[key] in value
-            data = data.filter(filter_data, num_proc=self.nproc)
-        if len(data) == 0:
-            logger.error(
-                    "No cells remain after filtering. Check filtering criteria.")
-            raise
+        if self.filter_data is not None:
+            for key,value in self.filter_data.items():
+                def filter_data_by_criteria(example):
+                    return example[key] in value
+                data = data.filter(filter_data_by_criteria, num_proc=self.nproc)
+            if len(data) == 0:
+                logger.error(
+                        "No cells remain after filtering. Check filtering criteria.")
+                raise
         data_shuffled = data.shuffle(seed=42)
         num_cells = len(data_shuffled)
         # if max number of cells is defined, then subsample to this max number
