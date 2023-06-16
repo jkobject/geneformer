@@ -763,8 +763,9 @@ class InSilicoPerturber:
                     del cell_data
                     del data_list
                 elif self.anchor_token is None:
-                    del affected_gene
-                    del cos_sim_value
+                    if self.emb_mode == "cell_and_gene":
+                        del affected_gene
+                        del cos_sim_value
                 else:
                     del combo_cos_sim
                     del combo_cos_sims_data
