@@ -23,6 +23,7 @@ import random
 import statsmodels.stats.multitest as smt
 from pathlib import Path
 from scipy.stats import ranksums
+from sklearn.mixture import GaussianMixture
 from tqdm.notebook import trange
 
 from .tokenizer import TOKEN_DICTIONARY_FILE
@@ -37,16 +38,23 @@ def invert_dict(dictionary):
 
 # read raw dictionary files
 def read_dictionaries(dir, cell_or_gene_emb):
+    file_found = 0
     dict_list = []
     for file in os.listdir(dir):
         # process only _raw.pickle files
         if file.endswith("_raw.pickle"):
+            file_found = 1
             with open(f"{dir}/{file}", "rb") as fp:
                 cos_sims_dict = pickle.load(fp)
                 if cell_or_gene_emb == "cell":
                     cell_emb_dict = {k: v for k,
                                     v in cos_sims_dict.items() if v and "cell_emb" in k}
                 dict_list += [cell_emb_dict]
+    if file_found == 0:
+        logger.error(
+                    "No raw data for processing found within provided directory. " \
+                    "Please ensure data files end with '_raw.pickle'.")
+        raise
     return dict_list
 
 # get complete gene list
@@ -66,6 +74,21 @@ def n_detections(token, dict_list):
 
 def get_fdr(pvalues):
     return list(smt.multipletests(pvalues, alpha=0.05, method="fdr_bh")[1])
+
+def get_impact_component(test_value, gaussian_mixture_model):
+    impact_border = gaussian_mixture_model.means_[0][0]
+    nonimpact_border = gaussian_mixture_model.means_[1][0]
+    if test_value > nonimpact_border:
+        impact_component = 0
+    elif test_value < impact_border:
+        impact_component = 1
+    else:
+        impact_component_raw = gaussian_mixture_model.predict([[test_value]])[0]
+        if impact_component_raw == 1:
+            impact_component = 0
+        elif impact_component_raw == 0:
+            impact_component = 1
+    return impact_component
 
 # stats comparing cos sim shifts towards goal state of test perturbations vs random perturbations
 def isp_stats_to_goal_state(cos_sims_df, dict_list):
@@ -102,13 +125,13 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list):
         token = cos_sims_df["Gene"][i]
         name = cos_sims_df["Gene_name"][i]
         ensembl_id = cos_sims_df["Ensembl_ID"][i]
-        token_tuples = []
+        cos_shift_data = []
         
         for dict_i in dict_list:
-            token_tuples += dict_i.get((token, "cell_emb"),[])
+            cos_shift_data += dict_i.get((token, "cell_emb"),[])
         
-        goal_end_cos_sim_megalist = [goal_end for goal_end,alt_end,start_state in token_tuples]
-        alt_end_cos_sim_megalist = [alt_end for goal_end,alt_end,start_state in token_tuples]
+        goal_end_cos_sim_megalist = [goal_end for goal_end,alt_end,start_state in cos_shift_data]
+        alt_end_cos_sim_megalist = [alt_end for goal_end,alt_end,start_state in cos_shift_data]
         
         mean_goal_end = np.mean(goal_end_cos_sim_megalist)
         mean_alt_end = np.mean(alt_end_cos_sim_megalist)
@@ -129,6 +152,13 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list):
         
     cos_sims_full_df["Goal_end_FDR"] = get_fdr(list(cos_sims_full_df["Goal_end_vs_random_pval"]))
     cos_sims_full_df["Alt_end_FDR"] = get_fdr(list(cos_sims_full_df["Alt_end_vs_random_pval"]))
+    
+    # quantify number of detections of each gene
+    cos_sims_full_df["N_Detections"] = [n_detections(i, dict_list) for i in cos_sims_full_df["Gene"]]
+
+    # sort by shift to desired state
+    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Shift_from_goal_end",
+                                                        "Goal_end_FDR"])
     
     return cos_sims_full_df
 
@@ -165,18 +195,134 @@ def isp_stats_vs_null(cos_sims_df, dict_list, null_dict_list):
         cos_sims_full_df.loc[i, "N_Detections_null"] = len(null_shifts)
 
     cos_sims_full_df["Test_v_null_FDR"] = get_fdr(cos_sims_full_df["Test_v_null_pval"])
+    
+    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Test_v_null_avg_shift",
+                                                        "Test_v_null_FDR"])
+    return cos_sims_full_df
+
+# stats for identifying perturbations with largest effect within a given set of cells
+# fits a mixture model to 2 components (impact vs. non-impact) and
+# reports the most likely component for each test perturbation
+# Note: because assumes given perturbation has a consistent effect in the cells tested,
+# we recommend only using the mixture model strategy with uniform cell populations
+def isp_stats_mixture_model(cos_sims_df, dict_list, combos):
+    
+    names=["Gene",
+           "Gene_name",
+           "Ensembl_ID"]
+    
+    if combos == 0:
+        names += ["Test_avg_shift"]
+    elif combos == 1:
+        names += ["Anchor_shift",
+                  "Test_token_shift",
+                  "Sum_of_indiv_shifts",
+                  "Combo_shift",
+                  "Combo_minus_sum_shift"]
+        
+    names += ["Impact_component",
+              "Impact_component_percent"]
+
+    cos_sims_full_df = pd.DataFrame(columns=names)
+    avg_values = []
+    gene_names = []
+    
+    for i in trange(cos_sims_df.shape[0]):
+        token = cos_sims_df["Gene"][i]
+        name = cos_sims_df["Gene_name"][i]
+        ensembl_id = cos_sims_df["Ensembl_ID"][i]
+        cos_shift_data = []
+
+        for dict_i in dict_list:
+            cos_shift_data += dict_i.get((token, "cell_emb"),[])
+            
+        # Extract values for current gene
+        if combos == 0:
+            test_values = cos_shift_data
+        elif combos == 1:
+            test_values = []
+            for tup in cos_shift_data:
+                test_values.append(tup[2])            
+            
+        if len(test_values) > 0:
+            avg_value = np.mean(test_values)
+            avg_values.append(avg_value)
+            gene_names.append(name)
+    
+    # fit Gaussian mixture model to dataset of mean for each gene
+    avg_values_to_fit = np.array(avg_values).reshape(-1, 1)
+    gm = GaussianMixture(n_components=2, random_state=0).fit(avg_values_to_fit)
+            
+    for i in trange(cos_sims_df.shape[0]):
+        token = cos_sims_df["Gene"][i]
+        name = cos_sims_df["Gene_name"][i]
+        ensembl_id = cos_sims_df["Ensembl_ID"][i]
+        cos_shift_data = []
+
+        for dict_i in dict_list:
+            cos_shift_data += dict_i.get((token, "cell_emb"),[])
+        
+        if combos == 0:
+            mean_test = np.mean(cos_shift_data)
+            impact_components = [get_impact_component(value,gm) for value in cos_shift_data]
+        elif combos == 1:
+            anchor_cos_sim_megalist = [anchor for anchor,token,combo in cos_shift_data]
+            token_cos_sim_megalist = [token for anchor,token,combo in cos_shift_data]
+            anchor_plus_token_cos_sim_megalist = [1-((1-anchor)+(1-token)) for anchor,token,combo in cos_shift_data]
+            combo_anchor_token_cos_sim_megalist = [combo for anchor,token,combo in cos_shift_data]
+            combo_minus_sum_cos_sim_megalist = [combo-(1-((1-anchor)+(1-token))) for anchor,token,combo in cos_shift_data]
+
+            mean_anchor = np.mean(anchor_cos_sim_megalist)
+            mean_token = np.mean(token_cos_sim_megalist)
+            mean_sum = np.mean(anchor_plus_token_cos_sim_megalist)
+            mean_test = np.mean(combo_anchor_token_cos_sim_megalist)
+            mean_combo_minus_sum = np.mean(combo_minus_sum_cos_sim_megalist)
+            
+            impact_components = [get_impact_component(value,gm) for value in combo_anchor_token_cos_sim_megalist]
+        
+        impact_component = get_impact_component(mean_test,gm)
+        impact_component_percent = np.mean(impact_components)*100
+            
+        data_i = [token, 
+                  name, 
+                  ensembl_id]
+        if combos == 0:
+            data_i += [mean_test]
+        elif combos == 1:
+            data_i += [mean_anchor, 
+                       mean_token, 
+                       mean_sum, 
+                       mean_test,
+                       mean_combo_minus_sum]
+        data_i += [impact_component,
+                   impact_component_percent]
+        
+        cos_sims_df_i = pd.DataFrame(dict(zip(names,data_i)),index=[i])
+        cos_sims_full_df = pd.concat([cos_sims_full_df,cos_sims_df_i])
+        
+    # quantify number of detections of each gene
+    cos_sims_full_df["N_Detections"] = [n_detections(i, dict_list) for i in cos_sims_full_df["Gene"]]
+    
+    if combos == 0:
+        cos_sims_full_df = cos_sims_full_df.sort_values(by=["Impact_component",
+                                                            "Test_avg_shift"],
+                                                            ascending=[False,True])    
+    elif combos == 1:
+        cos_sims_full_df = cos_sims_full_df.sort_values(by=["Impact_component",
+                                                            "Combo_minus_sum_shift"],
+                                                            ascending=[False,True])
     return cos_sims_full_df
 
 class InSilicoPerturberStats:
     valid_option_dict = {
-        "mode": {"goal_state_shift","vs_null","vs_random"},
-        "combos": {0,1,2},
+        "mode": {"goal_state_shift","vs_null","mixture_model"},
+        "combos": {0,1},
         "anchor_gene": {None, str},
         "cell_states_to_model": {None, dict},
     }
     def __init__(
         self,
-        mode="vs_random",
+        mode="mixture_model",
         combos=0,
         anchor_gene=None,
         cell_states_to_model=None,
@@ -188,11 +334,11 @@ class InSilicoPerturberStats:
 
         Parameters
         ----------
-        mode : {"goal_state_shift","vs_null","vs_random"}
+        mode : {"goal_state_shift","vs_null","mixture_model"}
             Type of stats.
             "goal_state_shift": perturbation vs. random for desired cell state shift
             "vs_null": perturbation vs. null from provided null distribution dataset
-            "vs_random": perturbation vs. random gene perturbations in that cell (no goal direction)
+            "mixture_model": perturbation in impact vs. no impact component of mixture model (no goal direction)
         combos : {0,1,2}
             Whether to perturb genes individually (0), in pairs (1), or in triplets (2).
         anchor_gene : None, str
@@ -233,7 +379,9 @@ class InSilicoPerturberStats:
         for attr_name,valid_options in self.valid_option_dict.items():
             attr_value = self.__dict__[attr_name]
             if type(attr_value) not in {list, dict}:
-                if attr_value in valid_options:
+                if attr_name in {"anchor_gene"}:
+                    continue
+                elif attr_value in valid_options:
                     continue
             valid_type = False
             for option in valid_options:
@@ -271,6 +419,14 @@ class InSilicoPerturberStats:
                     "anchor_gene set to None. " \
                     "Currently, anchor gene not available " \
                     "when modeling multiple cell states.")
+                
+        if self.combos > 0:
+            if self.anchor_gene is None:
+                logger.error(
+                    "Currently, stats are only supported for combination " \
+                    "in silico perturbation run with anchor gene. Please add " \
+                    "anchor gene when using with combos > 0. ")
+                raise
 
     def get_stats(self,
                   input_data_directory,
@@ -292,10 +448,11 @@ class InSilicoPerturberStats:
             Prefix for output .dataset
         """
 
-        if self.mode not in ["goal_state_shift", "vs_null"]:
+        if self.mode not in ["goal_state_shift", "vs_null", "mixture_model"]:
             logger.error(
-                "Currently, only modes available are stats for goal_state_shift \
-                    and vs_null (comparing to null distribution).")
+                "Currently, only modes available are stats for goal_state_shift, " \
+                    "vs_null (comparing to null distribution), and " \
+                    "mixture_model (fitting mixture model for perturbations with or without impact.")
             raise
 
         self.gene_token_id_dict = invert_dict(self.gene_token_dict)
@@ -318,19 +475,12 @@ class InSilicoPerturberStats:
         if self.mode == "goal_state_shift":
             cos_sims_df = isp_stats_to_goal_state(cos_sims_df_initial, dict_list)
             
-            # quantify number of detections of each gene
-            cos_sims_df["N_Detections"] = [n_detections(i, dict_list) for i in cos_sims_df["Gene"]]
-            
-            # sort by shift to desired state
-            cos_sims_df = cos_sims_df.sort_values(by=["Shift_from_goal_end",
-                                                      "Goal_end_FDR"])
         elif self.mode == "vs_null":
-            dict_list = read_dictionaries(input_data_directory, "cell")
             null_dict_list = read_dictionaries(null_dist_data_directory, "cell")
-            cos_sims_df = isp_stats_vs_null(cos_sims_df_initial, dict_list,
-                null_dict_list)
-            cos_sims_df = cos_sims_df.sort_values(by=["Test_v_null_avg_shift",
-                                                      "Test_v_null_FDR"])
+            cos_sims_df = isp_stats_vs_null(cos_sims_df_initial, dict_list, null_dict_list)
+
+        elif self.mode == "mixture_model":
+            cos_sims_df = isp_stats_mixture_model(cos_sims_df_initial, dict_list, self.combos)
 
         # save perturbation stats to output_path
         output_path = (Path(output_directory) / output_prefix).with_suffix(".csv")
