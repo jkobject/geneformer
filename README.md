@@ -16,7 +16,7 @@ We detail applications and results in [our manuscript](https://www.nature.com/ar
 
 During pretraining, Geneformer gained a fundamental understanding of network dynamics, encoding network hierarchy in the model’s attention weights in a completely self-supervised manner. Fine-tuning Geneformer towards a diverse panel of downstream tasks relevant to chromatin and network dynamics using limited task-specific data demonstrated that Geneformer consistently boosted predictive accuracy. Applied to disease modeling with limited patient data, Geneformer identified candidate therapeutic targets. Overall, Geneformer represents a pretrained deep learning model from which fine-tuning towards a broad range of downstream applications can be pursued to accelerate discovery of key network regulators and candidate therapeutic targets.
 
-In [our manuscript](https://www.nature.com/articles/s41586-023-06139-9), we report results for the 6 layer Geneformer model pretrained on 30 million single cell transcriptomes. We additionally provide within this repository a 12 layer Geneformer model, also pretrained on Genecorpus-30M.
+In [our manuscript](https://www.nature.com/articles/s41586-023-06139-9), we report results for the 6 layer Geneformer model pretrained on Genecorpus-30M. We additionally provide within this repository a 12 layer Geneformer model, also pretrained on Genecorpus-30M.
 
 # Application
 The pretrained Geneformer model can be used directly for zero-shot learning, for example for in silico perturbation analysis, or by fine-tuning towards the relevant downstream task, such as gene or cell state classification.
