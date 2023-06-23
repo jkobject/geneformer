@@ -140,6 +140,18 @@ def make_comparison_batch(original_emb, indices_to_perturb):
         all_embs_list += [torch.cat(emb_list)]
     return torch.stack(all_embs_list)
 
+# perturbed cell emb removing the activated/overexpressed/inhibited gene emb
+# so that only non-perturbed gene embeddings are compared to each other
+# in original or perturbed context
+def make_perturbed_remainder_batch(emb_batch, indices_to_remove):
+    if type(indices_to_remove) == int:
+        indices_to_keep = [i for i in range(emb_batch.size()[1])]
+        indices_to_keep.pop(indices_to_remove)
+        perturbed_remainder_batch = torch.stack([emb[indices_to_keep,:] for emb in emb_batch])   
+    elif type(indices_to_remove) == list:
+        perturbed_remainder_batch = torch.stack([make_comparison_batch(emb_batch[i],indices_to_remove[i]) for i in range(len(emb_batch))])
+    return perturbed_remainder_batch
+
 # average embedding position of goal cell states
 def get_cell_state_avg_embs(model,
                             filtered_input_data,
@@ -188,6 +200,7 @@ def get_cell_state_avg_embs(model,
 
 # quantify cosine similarity of perturbed vs original or alternate states
 def quant_cos_sims(model, 
+                   perturb_type,
                    perturbation_batch, 
                    forward_batch_size, 
                    layer_to_quant, 
@@ -226,8 +239,14 @@ def quant_cos_sims(model,
             minibatch_emb = outputs.hidden_states[layer_to_quant]
         if cell_states_to_model is None:
             minibatch_comparison = comparison_batch[i:max_range]
+            if perturb_type == "overexpress":
+                index_to_remove = 0
+                minibatch_emb = make_perturbed_remainder_batch(minibatch_emb, index_to_remove)
+            # elif (perturb_type == "inhibit") or (perturb_type == "activate"):
+            #     index_to_remove = placeholder
+            #     minibatch_emb = make_perturbed_remainder_batch(minibatch_emb, index_to_remove)
             cos_sims += [cos(minibatch_emb, minibatch_comparison).to("cpu")]
-        else:
+        elif cell_states_to_model is not None:
             for state in possible_states:
                 cos_sims_vs_alt_dict[state] += cos_sim_shift(original_emb, minibatch_emb, state_embs_dict[state])
         del outputs
@@ -279,9 +298,9 @@ def pad_tensor_list(tensor_list, dynamic_or_constant, token_dictionary):
 class InSilicoPerturber:
     valid_option_dict = {
         "perturb_type": {"delete","overexpress","inhibit","activate"},
-        "perturb_rank_shift": {None, int},
+        "perturb_rank_shift": {None, 1, 2, 3},
         "genes_to_perturb": {"all", list},
-        "combos": {0,1,2},
+        "combos": {0, 1, 2},
         "anchor_gene": {None, str},
         "model_type": {"Pretrained","GeneClassifier","CellClassifier"},
         "num_classes": {int},
@@ -326,7 +345,7 @@ class InSilicoPerturber:
             "overexpress": move gene to front of rank value encoding
             "inhibit": move gene to lower quartile of rank value encoding
             "activate": move gene to higher quartile of rank value encoding
-        perturb_rank_shift : None, int
+        perturb_rank_shift : None, {1,2,3}
             Number of quartiles by which to shift rank of gene.
             For example, if perturb_type="activate" and perturb_rank_shift=1:
                 genes in 4th quartile will move to middle of 3rd quartile.
@@ -414,6 +433,15 @@ class InSilicoPerturber:
             self.tokens_to_perturb = [self.gene_token_dict[gene] for gene in self.genes_to_perturb]
 
     def validate_options(self):
+        # first disallow options under development
+        if self.perturb_type in ["inhibit", "activate"]:
+            logger.error(
+                f"In silico inhibition and activation currently under developemnt. " \
+                f"Current valid options for 'perturb_type': 'delete' or 'overexpress'"
+            )
+            raise
+        
+        # confirm arguments are within valid options and compatible with each other
         for attr_name,valid_options in self.valid_option_dict.items():
             attr_value = self.__dict__[attr_name]
             if type(attr_value) not in {list, dict}:
@@ -442,7 +470,7 @@ class InSilicoPerturber:
                 elif self.perturb_type == "overexpress":
                     logger.warning(
                         "perturb_rank_shift set to None. " \
-                        "If perturb type is activate then gene is moved to front " \
+                        "If perturb type is overexpress then gene is moved to front " \
                         "of rank value encoding rather than shifted by quartile")
             self.perturb_rank_shift = None
         
@@ -626,13 +654,14 @@ class InSilicoPerturber:
                                                                                     combo_lvl,
                                                                                     self.nproc)
                     cos_sims_data = quant_cos_sims(model,
-                                                  perturbation_batch, 
-                                                  self.forward_batch_size, 
-                                                  layer_to_quant, 
-                                                  original_emb, 
-                                                  indices_to_perturb,
-                                                  self.cell_states_to_model,
-                                                  state_embs_dict)
+                                                   self.perturb_type,
+                                                   perturbation_batch, 
+                                                   self.forward_batch_size, 
+                                                   layer_to_quant, 
+                                                   original_emb, 
+                                                   indices_to_perturb,
+                                                   self.cell_states_to_model,
+                                                   state_embs_dict)
                     
                     if self.cell_states_to_model is None:
                         # update cos sims dict
@@ -699,6 +728,7 @@ class InSilicoPerturber:
                                                                                  0,
                                                                                  self.nproc)
                 cos_sims_data = quant_cos_sims(model,
+                                               self.perturb_type,
                                                perturbation_batch,
                                                self.forward_batch_size,
                                                layer_to_quant,
@@ -715,6 +745,7 @@ class InSilicoPerturber:
                                                                                              1,
                                                                                              self.nproc)
                 combo_cos_sims_data = quant_cos_sims(model,
+                                                     self.perturb_type,
                                                      combo_perturbation_batch,
                                                      self.forward_batch_size,
                                                      layer_to_quant,
