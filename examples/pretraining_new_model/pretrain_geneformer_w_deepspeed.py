@@ -99,7 +99,7 @@ subprocess.call(f"mkdir {training_output_dir}", shell=True)
 subprocess.call(f"mkdir {model_output_dir}", shell=True)
 
 
-# load gene_ensembl_id:token dictionary (e.g. https://huggingface.co/datasets/ctheodoris/Genecorpus-30M/tree/main/datasets/token_dictionary.pkl)
+# load gene_ensembl_id:token dictionary (e.g. https://huggingface.co/datasets/ctheodoris/Genecorpus-30M/blob/main/token_dictionary.pkl)
 with open("token_dictionary.pkl", "rb") as fp:
     token_dictionary = pickle.load(fp)
 
@@ -153,8 +153,8 @@ trainer = GeneformerPretrainer(
     args=training_args,
     # pretraining corpus (e.g. https://huggingface.co/datasets/ctheodoris/Genecorpus-30M/tree/main/genecorpus_30M_2048.dataset)
     train_dataset=load_from_disk("genecorpus_30M_2048.dataset"),
-    # file of lengths of each example cell (e.g. https://huggingface.co/datasets/ctheodoris/Genecorpus-30M/tree/main/genecorpus_30M_2048_sorted_lengths.pkl)
-    example_lengths_file="genecorpus_30M_2048_sorted_lengths.pkl",
+    # file of lengths of each example cell (e.g. https://huggingface.co/datasets/ctheodoris/Genecorpus-30M/blob/main/genecorpus_30M_2048_lengths.pkl)
+    example_lengths_file="genecorpus_30M_2048_lengths.pkl",
     token_dictionary=token_dictionary,
 )
 
