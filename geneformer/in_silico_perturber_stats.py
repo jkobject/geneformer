@@ -107,26 +107,37 @@ def get_impact_component(test_value, gaussian_mixture_model):
     return impact_component
 
 # stats comparing cos sim shifts towards goal state of test perturbations vs random perturbations
-def isp_stats_to_goal_state(cos_sims_df, dict_list):
+def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model):
+    if (cell_states_to_model["disease"][2] == []) | (cell_states_to_model["disease"][2] == [None]):
+        alt_end_state_exists = False
+    elif (len(cell_states_to_model["disease"][2]) > 0) & (cell_states_to_model["disease"][2] != [None]):
+        alt_end_state_exists = True
+    
     random_tuples = []
     for i in trange(cos_sims_df.shape[0]):
         token = cos_sims_df["Gene"][i]
         for dict_i in dict_list:
             random_tuples += dict_i.get((token, "cell_emb"),[])
-    goal_end_random_megalist = [goal_end for goal_end,alt_end,start_state in random_tuples]
-    alt_end_random_megalist = [alt_end for goal_end,alt_end,start_state in random_tuples]
-    start_state_random_megalist = [start_state for goal_end,alt_end,start_state in random_tuples]
+    
+    if alt_end_state_exists == False:
+        goal_end_random_megalist = [goal_end for goal_end,start_state in random_tuples]
+        start_state_random_megalist = [start_state for goal_end,start_state in random_tuples]
+    elif alt_end_state_exists == True:
+        goal_end_random_megalist = [goal_end for goal_end,alt_end,start_state in random_tuples]
+        alt_end_random_megalist = [alt_end for goal_end,alt_end,start_state in random_tuples]
+        start_state_random_megalist = [start_state for goal_end,alt_end,start_state in random_tuples]
     
     # downsample to improve speed of ranksums
     if len(goal_end_random_megalist) > 100_000:
         random.seed(42)
         goal_end_random_megalist = random.sample(goal_end_random_megalist, k=100_000)
-    if len(alt_end_random_megalist) > 100_000:
-        random.seed(42)
-        alt_end_random_megalist = random.sample(alt_end_random_megalist, k=100_000)
     if len(start_state_random_megalist) > 100_000:
         random.seed(42)
         start_state_random_megalist = random.sample(start_state_random_megalist, k=100_000)
+    if alt_end_state_exists == True:
+        if len(alt_end_random_megalist) > 100_000:
+            random.seed(42)
+            alt_end_random_megalist = random.sample(alt_end_random_megalist, k=100_000)
     
     names=["Gene",
            "Gene_name",
@@ -135,6 +146,9 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list):
            "Shift_from_alt_end",
            "Goal_end_vs_random_pval",
            "Alt_end_vs_random_pval"]
+    if alt_end_state_exists == False:
+        names.remove("Shift_from_alt_end")
+        names.remove("Alt_end_vs_random_pval")
     cos_sims_full_df = pd.DataFrame(columns=names)
     
     for i in trange(cos_sims_df.shape[0]):
@@ -145,29 +159,39 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list):
         
         for dict_i in dict_list:
             cos_shift_data += dict_i.get((token, "cell_emb"),[])
-        
-        goal_end_cos_sim_megalist = [goal_end for goal_end,alt_end,start_state in cos_shift_data]
-        alt_end_cos_sim_megalist = [alt_end for goal_end,alt_end,start_state in cos_shift_data]
+
+        if alt_end_state_exists == False:
+            goal_end_cos_sim_megalist = [goal_end for goal_end,start_state in cos_shift_data]    
+        elif alt_end_state_exists == True:
+            goal_end_cos_sim_megalist = [goal_end for goal_end,alt_end,start_state in cos_shift_data]
+            alt_end_cos_sim_megalist = [alt_end for goal_end,alt_end,start_state in cos_shift_data]
+            mean_alt_end = np.mean(alt_end_cos_sim_megalist)
+            pval_alt_end = ranksums(alt_end_random_megalist,alt_end_cos_sim_megalist).pvalue
         
         mean_goal_end = np.mean(goal_end_cos_sim_megalist)
-        mean_alt_end = np.mean(alt_end_cos_sim_megalist)
-        
         pval_goal_end = ranksums(goal_end_random_megalist,goal_end_cos_sim_megalist).pvalue
-        pval_alt_end = ranksums(alt_end_random_megalist,alt_end_cos_sim_megalist).pvalue
         
-        data_i = [token, 
-                  name,
-                  ensembl_id,
-                  mean_goal_end, 
-                  mean_alt_end,
-                  pval_goal_end,
-                  pval_alt_end]
-        
+        if alt_end_state_exists == False:
+            data_i = [token, 
+                      name,
+                      ensembl_id,
+                      mean_goal_end, 
+                      pval_goal_end]
+        elif alt_end_state_exists == True:
+            data_i = [token, 
+                      name,
+                      ensembl_id,
+                      mean_goal_end, 
+                      mean_alt_end,
+                      pval_goal_end,
+                      pval_alt_end]
+            
         cos_sims_df_i = pd.DataFrame(dict(zip(names,data_i)),index=[i])
         cos_sims_full_df = pd.concat([cos_sims_full_df,cos_sims_df_i])
         
     cos_sims_full_df["Goal_end_FDR"] = get_fdr(list(cos_sims_full_df["Goal_end_vs_random_pval"]))
-    cos_sims_full_df["Alt_end_FDR"] = get_fdr(list(cos_sims_full_df["Alt_end_vs_random_pval"]))
+    if alt_end_state_exists == True:
+        cos_sims_full_df["Alt_end_FDR"] = get_fdr(list(cos_sims_full_df["Alt_end_vs_random_pval"]))
     
     # quantify number of detections of each gene
     cos_sims_full_df["N_Detections"] = [n_detections(i, dict_list, "cell", None) for i in cos_sims_full_df["Gene"]]
@@ -376,6 +400,8 @@ class InSilicoPerturberStats:
             Cell states to model if testing perturbations that achieve goal state change.
             Single-item dictionary with key being cell attribute (e.g. "disease").
             Value is tuple of three lists indicating start state, goal end state, and alternate possible end states.
+            If no alternate possible end states, third list should be empty or have a single element that is None.
+            (i.e. the third list should be [] or [None]).
         token_dictionary_file : Path
             Path to pickle file containing token dictionary (Ensembl ID:token).
         gene_name_id_dictionary_file : Path
@@ -506,7 +532,7 @@ class InSilicoPerturberStats:
                                              index=[i for i in range(len(gene_list))])
 
         if self.mode == "goal_state_shift":
-            cos_sims_df = isp_stats_to_goal_state(cos_sims_df_initial, dict_list)
+            cos_sims_df = isp_stats_to_goal_state(cos_sims_df_initial, dict_list, self.cell_states_to_model)
             
         elif self.mode == "vs_null":
             null_dict_list = read_dictionaries(null_dist_data_directory, "cell", self.anchor_token)
