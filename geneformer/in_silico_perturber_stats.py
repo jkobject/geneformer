@@ -108,7 +108,7 @@ def get_impact_component(test_value, gaussian_mixture_model):
 
 # stats comparing cos sim shifts towards goal state of test perturbations vs random perturbations
 def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model):
-    if (cell_states_to_model["disease"][2] == []) | (cell_states_to_model["disease"][2] == [None]):
+    if cell_states_to_model["disease"][2] == []:
         alt_end_state_exists = False
     elif (len(cell_states_to_model["disease"][2]) > 0) & (cell_states_to_model["disease"][2] != [None]):
         alt_end_state_exists = True
@@ -400,8 +400,7 @@ class InSilicoPerturberStats:
             Cell states to model if testing perturbations that achieve goal state change.
             Single-item dictionary with key being cell attribute (e.g. "disease").
             Value is tuple of three lists indicating start state, goal end state, and alternate possible end states.
-            If no alternate possible end states, third list should be empty or have a single element that is None.
-            (i.e. the third list should be [] or [None]).
+            If no alternate possible end states, third list should be empty (i.e. the third list should be []).
         token_dictionary_file : Path
             Path to pickle file containing token dictionary (Ensembl ID:token).
         gene_name_id_dictionary_file : Path
