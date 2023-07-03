@@ -106,7 +106,8 @@ class TranscriptomeTokenizer:
 
     def tokenize_files(self, loom_data_directory):
         tokenized_cells = []
-        cell_metadata = {attr_key: [] for attr_key in self.custom_attr_name_dict.keys()}
+        loom_cell_attr = [attr_key for attr_key in self.custom_attr_name_dict.keys()]
+        cell_metadata = {attr_key: [] for attr_key in self.custom_attr_name_dict.values()}
 
         # loops through directories to tokenize .loom files
         for loom_file_path in loom_data_directory.glob("*.loom"):
@@ -115,8 +116,8 @@ class TranscriptomeTokenizer:
                 loom_file_path
             )
             tokenized_cells += file_tokenized_cells
-            for k in cell_metadata.keys():
-                cell_metadata[k] += file_cell_metadata[k]
+            for k in loom_cell_attr:
+                cell_metadata[self.custom_attr_name_dict[k]] += file_cell_metadata[k]
 
         return tokenized_cells, cell_metadata
 
