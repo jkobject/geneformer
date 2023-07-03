@@ -44,7 +44,7 @@ def quant_layers(model):
     layer_nums = []
     for name, parameter in model.named_parameters():
         if "layer" in name:
-            layer_nums += [name.split("layer.")[1].split(".")[0]]
+            layer_nums += [int(name.split("layer.")[1].split(".")[0])]
     return int(max(layer_nums))+1
 
 def flatten_list(megalist):
