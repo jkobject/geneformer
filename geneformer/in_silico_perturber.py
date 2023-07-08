@@ -266,7 +266,6 @@ def quant_cos_sims(model,
 def cos_sim_shift(original_emb, minibatch_emb, alt_emb):
     cos = torch.nn.CosineSimilarity(dim=2)
     original_emb = torch.mean(original_emb,dim=0,keepdim=True)[None, :]
-    alt_emb = alt_emb[None, None, :]
     origin_v_end = cos(original_emb,alt_emb)
     perturb_v_end = cos(torch.mean(minibatch_emb,dim=1,keepdim=True),alt_emb)
     return [(perturb_v_end-origin_v_end).to("cpu")]
@@ -483,7 +482,7 @@ class InSilicoPerturber:
                 "only outputs effect on cell embeddings.")
         
         if self.cell_states_to_model is not None:
-            if (len(self.cell_states_to_model.items()) == 1):
+            if len(self.cell_states_to_model.items()) == 1:
                 for key,value in self.cell_states_to_model.items():
                     if (len(value) == 3) and isinstance(value, tuple):
                         if isinstance(value[0],list) and isinstance(value[1],list) and isinstance(value[2],list):

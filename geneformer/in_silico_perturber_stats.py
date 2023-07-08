@@ -108,9 +108,10 @@ def get_impact_component(test_value, gaussian_mixture_model):
 
 # stats comparing cos sim shifts towards goal state of test perturbations vs random perturbations
 def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model):
-    if cell_states_to_model["disease"][2] == []:
+    cell_state_key = list(cell_states_to_model.keys())[0]
+    if cell_states_to_model[cell_state_key][2] == []:
         alt_end_state_exists = False
-    elif (len(cell_states_to_model["disease"][2]) > 0) & (cell_states_to_model["disease"][2] != [None]):
+    elif (len(cell_states_to_model[cell_state_key][2]) > 0) and (cell_states_to_model[cell_state_key][2] != [None]):
         alt_end_state_exists = True
     
     random_tuples = []
@@ -120,20 +121,15 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model):
             random_tuples += dict_i.get((token, "cell_emb"),[])
     
     if alt_end_state_exists == False:
-        goal_end_random_megalist = [goal_end for goal_end,start_state in random_tuples]
-        start_state_random_megalist = [start_state for goal_end,start_state in random_tuples]
+        goal_end_random_megalist = [goal_end for start_state,goal_end in random_tuples]
     elif alt_end_state_exists == True:
-        goal_end_random_megalist = [goal_end for goal_end,alt_end,start_state in random_tuples]
-        alt_end_random_megalist = [alt_end for goal_end,alt_end,start_state in random_tuples]
-        start_state_random_megalist = [start_state for goal_end,alt_end,start_state in random_tuples]
+        goal_end_random_megalist = [goal_end for start_state,goal_end,alt_end in random_tuples]
+        alt_end_random_megalist = [alt_end for start_state,goal_end,alt_end in random_tuples]
     
     # downsample to improve speed of ranksums
     if len(goal_end_random_megalist) > 100_000:
         random.seed(42)
         goal_end_random_megalist = random.sample(goal_end_random_megalist, k=100_000)
-    if len(start_state_random_megalist) > 100_000:
-        random.seed(42)
-        start_state_random_megalist = random.sample(start_state_random_megalist, k=100_000)
     if alt_end_state_exists == True:
         if len(alt_end_random_megalist) > 100_000:
             random.seed(42)
@@ -161,10 +157,10 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model):
             cos_shift_data += dict_i.get((token, "cell_emb"),[])
 
         if alt_end_state_exists == False:
-            goal_end_cos_sim_megalist = [goal_end for goal_end,start_state in cos_shift_data]    
+            goal_end_cos_sim_megalist = [goal_end for start_state,goal_end in cos_shift_data]    
         elif alt_end_state_exists == True:
-            goal_end_cos_sim_megalist = [goal_end for goal_end,alt_end,start_state in cos_shift_data]
-            alt_end_cos_sim_megalist = [alt_end for goal_end,alt_end,start_state in cos_shift_data]
+            goal_end_cos_sim_megalist = [goal_end for start_state,goal_end,alt_end in cos_shift_data]
+            alt_end_cos_sim_megalist = [alt_end for start_state,goal_end,alt_end in cos_shift_data]
             mean_alt_end = np.mean(alt_end_cos_sim_megalist)
             pval_alt_end = ranksums(alt_end_random_megalist,alt_end_cos_sim_megalist).pvalue
         
@@ -451,7 +447,7 @@ class InSilicoPerturberStats:
             raise
         
         if self.cell_states_to_model is not None:
-            if (len(self.cell_states_to_model.items()) == 1):
+            if len(self.cell_states_to_model.items()) == 1:
                 for key,value in self.cell_states_to_model.items():
                     if (len(value) == 3) and isinstance(value, tuple):
                         if isinstance(value[0],list) and isinstance(value[1],list) and isinstance(value[2],list):
