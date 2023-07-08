@@ -142,12 +142,12 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model):
     names=["Gene",
            "Gene_name",
            "Ensembl_ID",
-           "Shift_from_goal_end",
-           "Shift_from_alt_end",
+           "Shift_to_goal_end",
+           "Shift_to_alt_end",
            "Goal_end_vs_random_pval",
            "Alt_end_vs_random_pval"]
     if alt_end_state_exists == False:
-        names.remove("Shift_from_alt_end")
+        names.remove("Shift_to_alt_end")
         names.remove("Alt_end_vs_random_pval")
     cos_sims_full_df = pd.DataFrame(columns=names)
     
@@ -197,8 +197,9 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model):
     cos_sims_full_df["N_Detections"] = [n_detections(i, dict_list, "cell", None) for i in cos_sims_full_df["Gene"]]
 
     # sort by shift to desired state
-    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Shift_from_goal_end",
-                                                        "Goal_end_FDR"])
+    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Shift_to_goal_end",
+                                                        "Goal_end_FDR"],
+                                                        ascending=[False,True])
     
     return cos_sims_full_df
 
@@ -208,9 +209,9 @@ def isp_stats_vs_null(cos_sims_df, dict_list, null_dict_list):
 
     cos_sims_full_df["Test_avg_shift"] = np.zeros(cos_sims_df.shape[0], dtype=float)
     cos_sims_full_df["Null_avg_shift"] = np.zeros(cos_sims_df.shape[0], dtype=float)
-    cos_sims_full_df["Test_v_null_avg_shift"] = np.zeros(cos_sims_df.shape[0], dtype=float)
-    cos_sims_full_df["Test_v_null_pval"] = np.zeros(cos_sims_df.shape[0], dtype=float)
-    cos_sims_full_df["Test_v_null_FDR"] = np.zeros(cos_sims_df.shape[0], dtype=float)
+    cos_sims_full_df["Test_vs_null_avg_shift"] = np.zeros(cos_sims_df.shape[0], dtype=float)
+    cos_sims_full_df["Test_vs_null_pval"] = np.zeros(cos_sims_df.shape[0], dtype=float)
+    cos_sims_full_df["Test_vs_null_FDR"] = np.zeros(cos_sims_df.shape[0], dtype=float)
     cos_sims_full_df["N_Detections_test"] = np.zeros(cos_sims_df.shape[0], dtype="uint32")
     cos_sims_full_df["N_Detections_null"] = np.zeros(cos_sims_df.shape[0], dtype="uint32")
     
@@ -227,17 +228,18 @@ def isp_stats_vs_null(cos_sims_df, dict_list, null_dict_list):
         
         cos_sims_full_df.loc[i, "Test_avg_shift"] = np.mean(test_shifts)
         cos_sims_full_df.loc[i, "Null_avg_shift"] = np.mean(null_shifts)
-        cos_sims_full_df.loc[i, "Test_v_null_avg_shift"] = np.mean(test_shifts)-np.mean(null_shifts)       
-        cos_sims_full_df.loc[i, "Test_v_null_pval"] = ranksums(test_shifts,
+        cos_sims_full_df.loc[i, "Test_vs_null_avg_shift"] = np.mean(test_shifts)-np.mean(null_shifts)       
+        cos_sims_full_df.loc[i, "Test_vs_null_pval"] = ranksums(test_shifts,
             null_shifts, nan_policy="omit").pvalue
 
         cos_sims_full_df.loc[i, "N_Detections_test"] = len(test_shifts)
         cos_sims_full_df.loc[i, "N_Detections_null"] = len(null_shifts)
 
-    cos_sims_full_df["Test_v_null_FDR"] = get_fdr(cos_sims_full_df["Test_v_null_pval"])
+    cos_sims_full_df["Test_vs_null_FDR"] = get_fdr(cos_sims_full_df["Test_vs_null_pval"])
     
-    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Test_v_null_avg_shift",
-                                                        "Test_v_null_FDR"])
+    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Test_vs_null_avg_shift",
+                                                        "Test_vs_null_FDR"],
+                                                        ascending=[False,True])
     return cos_sims_full_df
 
 # stats for identifying perturbations with largest effect within a given set of cells
@@ -498,6 +500,46 @@ class InSilicoPerturberStats:
             Path to directory where perturbation data will be saved as .csv
         output_prefix : str
             Prefix for output .dataset
+            
+        Outputs
+        ----------
+        Definition of possible columns in .csv output file.
+        
+        Of note, not all columns will be present in all output files.
+        Some columns are specific to particular perturbation modes.
+        
+        "Gene": gene token
+        "Gene_name": gene name
+        "Ensembl_ID": gene Ensembl ID
+        "N_Detections": number of cells in which each gene or gene combination was detected in the input dataset
+        
+        "Shift_to_goal_end": cosine shift from start state towards goal end state in response to given perturbation
+        "Shift_to_alt_end": cosine shift from start state towards alternate end state in response to given perturbation
+        "Goal_end_vs_random_pval": pvalue of cosine shift from start state towards goal end state by Wilcoxon
+            pvalue compares shift caused by perturbing given gene compared to random genes
+        "Alt_end_vs_random_pval": pvalue of cosine shift from start state towards alternate end state by Wilcoxon
+            pvalue compares shift caused by perturbing given gene compared to random genes
+        "Goal_end_FDR": Benjamini-Hochberg correction of "Goal_end_vs_random_pval"
+        "Alt_end_FDR": Benjamini-Hochberg correction of "Alt_end_vs_random_pval"
+        
+        "Test_avg_shift": cosine shift in response to given perturbation in cells from test distribution
+        "Null_avg_shift": cosine shift in response to given perturbation in cells from null distribution (e.g. random cells)
+        "Test_vs_null_avg_shift": difference in cosine shift in cells from test vs. null distribution
+            (i.e. "Test_avg_shift" minus "Null_avg_shift")
+        "Test_vs_null_pval": pvalue of cosine shift in test vs. null distribution
+        "Test_vs_null_FDR": Benjamini-Hochberg correction of "Test_vs_null_pval"
+        "N_Detections_test": "N_Detections" in cells from test distribution
+        "N_Detections_null": "N_Detections" in cells from null distribution
+        
+        "Anchor_shift": cosine shift in response to given perturbation of anchor gene
+        "Test_token_shift": cosine shift in response to given perturbation of test gene
+        "Sum_of_indiv_shifts": sum of cosine shifts in response to individually perturbing test and anchor genes
+        "Combo_shift": cosine shift in response to given perturbation of both anchor and test gene(s) in combination
+        "Combo_minus_sum_shift": difference of cosine shifts in response combo perturbation vs. sum of individual perturbations
+            (i.e. "Combo_shift" minus "Sum_of_indiv_shifts")
+        "Impact_component": whether the given perturbation was modeled to be within the impact component by the mixture model
+            1: within impact component; 0: not within impact component
+        "Impact_component_percent": percent of cells in which given perturbation was modeled to be within impact component
         """
 
         if self.mode not in ["goal_state_shift", "vs_null", "mixture_model"]:
