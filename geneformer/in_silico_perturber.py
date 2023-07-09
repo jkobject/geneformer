@@ -447,6 +447,9 @@ class InSilicoPerturber:
             if type(attr_value) not in {list, dict}:
                 if attr_value in valid_options:
                     continue
+                if attr_name in ["anchor_gene"]:
+                    if type(attr_name) in {str}:
+                        continue
             valid_type = False
             for option in valid_options:
                 if (option in [int,list,dict]) and isinstance(attr_value, option):
@@ -555,6 +558,13 @@ class InSilicoPerturber:
                                                       self.gene_token_dict,
                                                       self.forward_batch_size,
                                                       self.nproc)
+            # filter for start state cells
+            start_state = list(self.cell_states_to_model.values())[0][0][0]
+            def filter_for_origin(example):
+                return example[list(self.cell_states_to_model.keys())[0]] in [start_state]
+            
+            filtered_input_data = filtered_input_data.filter(filter_for_origin, num_proc=self.nproc)
+            
         self.in_silico_perturb(model,
                               filtered_input_data,
                               layer_to_quant,
