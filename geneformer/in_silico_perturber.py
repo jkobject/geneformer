@@ -425,7 +425,7 @@ class InSilicoPerturber:
         if anchor_gene is None:
             self.anchor_token = None
         else:
-            self.anchor_token = self.gene_token_dict[self.anchor_gene]
+            self.anchor_token = [self.gene_token_dict[self.anchor_gene]]
 
         if genes_to_perturb == "all":
             self.tokens_to_perturb = "all"
