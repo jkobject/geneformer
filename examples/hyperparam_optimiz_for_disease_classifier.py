@@ -67,10 +67,10 @@ def classes_to_ids(example):
 trainset_v4 = trainset_v3.map(classes_to_ids, num_proc=num_proc)
 
 # separate into train, validation, test sets
-indiv_list = trainset_v4["individual"]
+indiv_set = set(trainset_v4["individual"])
 random.seed(42)
-train_indiv = random.sample(indiv_list,round(0.7*len(indiv_list)))
-eval_indiv = [indiv for indiv in indiv_list if indiv not in train_indiv]
+train_indiv = random.sample(indiv_set,round(0.7*len(indiv_set)))
+eval_indiv = [indiv for indiv in indiv_set if indiv not in train_indiv]
 valid_indiv = random.sample(eval_indiv,round(0.5*len(eval_indiv)))
 test_indiv = [indiv for indiv in eval_indiv if indiv not in valid_indiv]
 
