@@ -79,6 +79,9 @@ def get_gene_list(dict_list,mode):
     gene_list.sort()
     return gene_list
 
+def token_tuple_to_ensembl_ids(token_tuple, gene_token_id_dict):
+    return tuple([gene_token_id_dict.get(i, np.nan) for i in token_tuple])
+
 def n_detections(token, dict_list, mode, anchor_token):
     cos_sim_megalist = []
     for dict_i in dict_list:
@@ -106,98 +109,130 @@ def get_impact_component(test_value, gaussian_mixture_model):
             impact_component = 1
     return impact_component
 
+# aggregate data for single perturbation in multiple cells
+def isp_aggregate_grouped_perturb(cos_sims_df, dict_list):  
+    names=["Cosine_shift"]
+    cos_sims_full_df = pd.DataFrame(columns=names)
+
+    cos_shift_data = []
+    token = cos_sims_df["Gene"][0]
+    for dict_i in dict_list:
+        cos_shift_data += dict_i.get((token, "cell_emb"),[])
+    cos_sims_full_df["Cosine_shift"] = cos_shift_data
+    return cos_sims_full_df 
+
 # stats comparing cos sim shifts towards goal state of test perturbations vs random perturbations
-def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model):
+def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model, genes_perturbed):
     cell_state_key = list(cell_states_to_model.keys())[0]
     if cell_states_to_model[cell_state_key][2] == []:
         alt_end_state_exists = False
     elif (len(cell_states_to_model[cell_state_key][2]) > 0) and (cell_states_to_model[cell_state_key][2] != [None]):
         alt_end_state_exists = True
     
-    random_tuples = []
-    for i in trange(cos_sims_df.shape[0]):
-        token = cos_sims_df["Gene"][i]
-        for dict_i in dict_list:
-            random_tuples += dict_i.get((token, "cell_emb"),[])
-    
-    if alt_end_state_exists == False:
-        goal_end_random_megalist = [goal_end for start_state,goal_end in random_tuples]
-    elif alt_end_state_exists == True:
-        goal_end_random_megalist = [goal_end for start_state,goal_end,alt_end in random_tuples]
-        alt_end_random_megalist = [alt_end for start_state,goal_end,alt_end in random_tuples]
-    
-    # downsample to improve speed of ranksums
-    if len(goal_end_random_megalist) > 100_000:
-        random.seed(42)
-        goal_end_random_megalist = random.sample(goal_end_random_megalist, k=100_000)
-    if alt_end_state_exists == True:
-        if len(alt_end_random_megalist) > 100_000:
-            random.seed(42)
-            alt_end_random_megalist = random.sample(alt_end_random_megalist, k=100_000)
-    
-    names=["Gene",
-           "Gene_name",
-           "Ensembl_ID",
-           "Shift_to_goal_end",
-           "Shift_to_alt_end",
-           "Goal_end_vs_random_pval",
-           "Alt_end_vs_random_pval"]
-    if alt_end_state_exists == False:
-        names.remove("Shift_to_alt_end")
-        names.remove("Alt_end_vs_random_pval")
-    cos_sims_full_df = pd.DataFrame(columns=names)
-    
-    for i in trange(cos_sims_df.shape[0]):
-        token = cos_sims_df["Gene"][i]
-        name = cos_sims_df["Gene_name"][i]
-        ensembl_id = cos_sims_df["Ensembl_ID"][i]
-        cos_shift_data = []
+    # for single perturbation in multiple cells, there are no random perturbations to compare to
+    if genes_perturbed != "all":
+        names=["Shift_to_goal_end",
+               "Shift_to_alt_end"]
+        if alt_end_state_exists == False:
+            names.remove("Shift_to_alt_end")
+        cos_sims_full_df = pd.DataFrame(columns=names)
         
+        cos_shift_data = []
+        token = cos_sims_df["Gene"][0]
         for dict_i in dict_list:
             cos_shift_data += dict_i.get((token, "cell_emb"),[])
-
         if alt_end_state_exists == False:
-            goal_end_cos_sim_megalist = [goal_end for start_state,goal_end in cos_shift_data]    
-        elif alt_end_state_exists == True:
-            goal_end_cos_sim_megalist = [goal_end for start_state,goal_end,alt_end in cos_shift_data]
-            alt_end_cos_sim_megalist = [alt_end for start_state,goal_end,alt_end in cos_shift_data]
-            mean_alt_end = np.mean(alt_end_cos_sim_megalist)
-            pval_alt_end = ranksums(alt_end_random_megalist,alt_end_cos_sim_megalist).pvalue
-        
-        mean_goal_end = np.mean(goal_end_cos_sim_megalist)
-        pval_goal_end = ranksums(goal_end_random_megalist,goal_end_cos_sim_megalist).pvalue
-        
-        if alt_end_state_exists == False:
-            data_i = [token, 
-                      name,
-                      ensembl_id,
-                      mean_goal_end, 
-                      pval_goal_end]
-        elif alt_end_state_exists == True:
-            data_i = [token, 
-                      name,
-                      ensembl_id,
-                      mean_goal_end, 
-                      mean_alt_end,
-                      pval_goal_end,
-                      pval_alt_end]
+            cos_sims_full_df["Shift_to_goal_end"] = [goal_end for start_state,goal_end in cos_shift_data] 
+        if alt_end_state_exists == True:
+            cos_sims_full_df["Shift_to_goal_end"] = [goal_end for start_state,goal_end,alt_end in cos_shift_data] 
+            cos_sims_full_df["Shift_to_alt_end"] = [alt_end for start_state,goal_end,alt_end in cos_shift_data]
+        return cos_sims_full_df     
             
-        cos_sims_df_i = pd.DataFrame(dict(zip(names,data_i)),index=[i])
-        cos_sims_full_df = pd.concat([cos_sims_full_df,cos_sims_df_i])
-        
-    cos_sims_full_df["Goal_end_FDR"] = get_fdr(list(cos_sims_full_df["Goal_end_vs_random_pval"]))
-    if alt_end_state_exists == True:
-        cos_sims_full_df["Alt_end_FDR"] = get_fdr(list(cos_sims_full_df["Alt_end_vs_random_pval"]))
-    
-    # quantify number of detections of each gene
-    cos_sims_full_df["N_Detections"] = [n_detections(i, dict_list, "cell", None) for i in cos_sims_full_df["Gene"]]
+    elif genes_perturbed == "all":
+        random_tuples = []
+        for i in trange(cos_sims_df.shape[0]):
+            token = cos_sims_df["Gene"][i]
+            for dict_i in dict_list:
+                random_tuples += dict_i.get((token, "cell_emb"),[])
 
-    # sort by shift to desired state
-    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Shift_to_goal_end",
-                                                        "Goal_end_FDR"],
-                                                        ascending=[False,True])
+        if alt_end_state_exists == False:
+            goal_end_random_megalist = [goal_end for start_state,goal_end in random_tuples]
+        elif alt_end_state_exists == True:
+            goal_end_random_megalist = [goal_end for start_state,goal_end,alt_end in random_tuples]
+            alt_end_random_megalist = [alt_end for start_state,goal_end,alt_end in random_tuples]
+
+        # downsample to improve speed of ranksums
+        if len(goal_end_random_megalist) > 100_000:
+            random.seed(42)
+            goal_end_random_megalist = random.sample(goal_end_random_megalist, k=100_000)
+        if alt_end_state_exists == True:
+            if len(alt_end_random_megalist) > 100_000:
+                random.seed(42)
+                alt_end_random_megalist = random.sample(alt_end_random_megalist, k=100_000)
+
+        names=["Gene",
+               "Gene_name",
+               "Ensembl_ID",
+               "Shift_to_goal_end",
+               "Shift_to_alt_end",
+               "Goal_end_vs_random_pval",
+               "Alt_end_vs_random_pval"]
+        if alt_end_state_exists == False:
+            names.remove("Shift_to_alt_end")
+            names.remove("Alt_end_vs_random_pval")
+        cos_sims_full_df = pd.DataFrame(columns=names)
+
+        for i in trange(cos_sims_df.shape[0]):
+            token = cos_sims_df["Gene"][i]
+            name = cos_sims_df["Gene_name"][i]
+            ensembl_id = cos_sims_df["Ensembl_ID"][i]
+            cos_shift_data = []
+
+            for dict_i in dict_list:
+                cos_shift_data += dict_i.get((token, "cell_emb"),[])
+
+            if alt_end_state_exists == False:
+                goal_end_cos_sim_megalist = [goal_end for start_state,goal_end in cos_shift_data]    
+            elif alt_end_state_exists == True:
+                goal_end_cos_sim_megalist = [goal_end for start_state,goal_end,alt_end in cos_shift_data]
+                alt_end_cos_sim_megalist = [alt_end for start_state,goal_end,alt_end in cos_shift_data]
+                mean_alt_end = np.mean(alt_end_cos_sim_megalist)
+                pval_alt_end = ranksums(alt_end_random_megalist,alt_end_cos_sim_megalist).pvalue
+
+            mean_goal_end = np.mean(goal_end_cos_sim_megalist)
+            pval_goal_end = ranksums(goal_end_random_megalist,goal_end_cos_sim_megalist).pvalue
+
+            if alt_end_state_exists == False:
+                data_i = [token, 
+                          name,
+                          ensembl_id,
+                          mean_goal_end, 
+                          pval_goal_end]
+            elif alt_end_state_exists == True:
+                data_i = [token, 
+                          name,
+                          ensembl_id,
+                          mean_goal_end, 
+                          mean_alt_end,
+                          pval_goal_end,
+                          pval_alt_end]
+
+            cos_sims_df_i = pd.DataFrame(dict(zip(names,data_i)),index=[i])
+            cos_sims_full_df = pd.concat([cos_sims_full_df,cos_sims_df_i])
+
+        cos_sims_full_df["Goal_end_FDR"] = get_fdr(list(cos_sims_full_df["Goal_end_vs_random_pval"]))
+        if alt_end_state_exists == True:
+            cos_sims_full_df["Alt_end_FDR"] = get_fdr(list(cos_sims_full_df["Alt_end_vs_random_pval"]))
+
+        # quantify number of detections of each gene
+        cos_sims_full_df["N_Detections"] = [n_detections(i, dict_list, "cell", None) for i in cos_sims_full_df["Gene"]]
+
+        # sort by shift to desired state
+        cos_sims_full_df = cos_sims_full_df.sort_values(by=["Shift_to_goal_end",
+                                                            "Goal_end_FDR"],
+                                                            ascending=[False,True])
     
-    return cos_sims_full_df
+        return cos_sims_full_df
 
 # stats comparing cos sim shifts of test perturbations vs null distribution
 def isp_stats_vs_null(cos_sims_df, dict_list, null_dict_list):
@@ -362,7 +397,7 @@ def isp_stats_mixture_model(cos_sims_df, dict_list, combos, anchor_token):
 
 class InSilicoPerturberStats:
     valid_option_dict = {
-        "mode": {"goal_state_shift","vs_null","mixture_model"},
+        "mode": {"goal_state_shift","vs_null","mixture_model","aggregate_data"},
         "combos": {0,1},
         "anchor_gene": {None, str},
         "cell_states_to_model": {None, dict},
@@ -370,6 +405,7 @@ class InSilicoPerturberStats:
     def __init__(
         self,
         mode="mixture_model",
+        genes_perturbed="all",
         combos=0,
         anchor_gene=None,
         cell_states_to_model=None,
@@ -381,11 +417,16 @@ class InSilicoPerturberStats:
 
         Parameters
         ----------
-        mode : {"goal_state_shift","vs_null","mixture_model"}
+        mode : {"goal_state_shift","vs_null","mixture_model","aggregate_data"}
             Type of stats.
             "goal_state_shift": perturbation vs. random for desired cell state shift
             "vs_null": perturbation vs. null from provided null distribution dataset
             "mixture_model": perturbation in impact vs. no impact component of mixture model (no goal direction)
+            "aggregate_data": aggregates cosine shifts for single perturbation in multiple cells
+        genes_perturbed : "all", list
+            Genes perturbed in isp experiment.
+            Default is assuming genes_to_perturb in isp experiment was "all" (each gene in each cell).
+            Otherwise, may provide a list of ENSEMBL IDs of genes perturbed as a group all together.
         combos : {0,1,2}
             Whether to perturb genes individually (0), in pairs (1), or in triplets (2).
         anchor_gene : None, str
@@ -406,6 +447,7 @@ class InSilicoPerturberStats:
         """
 
         self.mode = mode
+        self.genes_perturbed = genes_perturbed
         self.combos = combos
         self.anchor_gene = anchor_gene
         self.cell_states_to_model = cell_states_to_model
@@ -477,6 +519,17 @@ class InSilicoPerturberStats:
                     "in silico perturbation run with anchor gene. Please add " \
                     "anchor gene when using with combos > 0. ")
                 raise
+        
+        if (self.mode == "mixture_model") and (self.genes_perturbed != "all"):
+            logger.error(
+                    "Mixture model mode requires multiple gene perturbations to fit model " \
+                    "so is incompatible with a single grouped perturbation.")
+            raise
+        if (self.mode == "aggregate_data") and (self.genes_perturbed == "all"):
+            logger.error(
+                    "Simple data aggregation mode is for single perturbation in multiple cells " \
+                    "so is incompatible with a genes_perturbed being 'all'.")
+            raise            
 
     def get_stats(self,
                   input_data_directory,
@@ -495,7 +548,7 @@ class InSilicoPerturberStats:
         output_directory : Path
             Path to directory where perturbation data will be saved as .csv
         output_prefix : str
-            Prefix for output .dataset
+            Prefix for output .csv
             
         Outputs
         ----------
@@ -538,11 +591,11 @@ class InSilicoPerturberStats:
         "Impact_component_percent": percent of cells in which given perturbation was modeled to be within impact component
         """
 
-        if self.mode not in ["goal_state_shift", "vs_null", "mixture_model"]:
+        if self.mode not in ["goal_state_shift", "vs_null", "mixture_model","aggregate_data"]:
             logger.error(
                 "Currently, only modes available are stats for goal_state_shift, " \
-                    "vs_null (comparing to null distribution), and " \
-                    "mixture_model (fitting mixture model for perturbations with or without impact.")
+                "vs_null (comparing to null distribution), and " \
+                "mixture_model (fitting mixture model for perturbations with or without impact.")
             raise
 
         self.gene_token_id_dict = invert_dict(self.gene_token_dict)
@@ -562,14 +615,16 @@ class InSilicoPerturberStats:
         cos_sims_df_initial = pd.DataFrame({"Gene": gene_list, 
                                             "Gene_name": [self.token_to_gene_name(item) \
                                                           for item in gene_list], \
-                                            "Ensembl_ID": [self.gene_token_id_dict[genes[1]] \
+                                            "Ensembl_ID": [token_tuple_to_ensembl_ids(genes, self.gene_token_id_dict) \
+                                                           if self.genes_perturbed != "all" else \
+                                                           self.gene_token_id_dict[genes[1]] \
                                                            if isinstance(genes,tuple) else \
                                                            self.gene_token_id_dict[genes] \
                                                            for genes in gene_list]}, \
                                              index=[i for i in range(len(gene_list))])
 
         if self.mode == "goal_state_shift":
-            cos_sims_df = isp_stats_to_goal_state(cos_sims_df_initial, dict_list, self.cell_states_to_model)
+            cos_sims_df = isp_stats_to_goal_state(cos_sims_df_initial, dict_list, self.cell_states_to_model, self.genes_perturbed)
             
         elif self.mode == "vs_null":
             null_dict_list = read_dictionaries(null_dist_data_directory, "cell", self.anchor_token)
@@ -577,6 +632,9 @@ class InSilicoPerturberStats:
 
         elif self.mode == "mixture_model":
             cos_sims_df = isp_stats_mixture_model(cos_sims_df_initial, dict_list, self.combos, self.anchor_token)
+            
+        elif self.mode == "aggregate_data":
+            cos_sims_df = isp_aggregate_grouped_perturb(cos_sims_df_initial, dict_list)
 
         # save perturbation stats to output_path
         output_path = (Path(output_directory) / output_prefix).with_suffix(".csv")
