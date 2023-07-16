@@ -42,7 +42,7 @@ def tokenize_cell(gene_vector, gene_tokens):
 class TranscriptomeTokenizer:
     def __init__(
         self,
-        custom_attr_name_dict,
+        custom_attr_name_dict=None,
         nproc=1,
         gene_median_file=GENE_MEDIAN_FILE,
         token_dictionary_file=TOKEN_DICTIONARY_FILE,
@@ -52,7 +52,7 @@ class TranscriptomeTokenizer:
 
         Parameters
         ----------
-        custom_attr_name_dict : dict
+        custom_attr_name_dict : None, dict
             Dictionary of custom attributes to be added to the dataset.
             Keys are the names of the attributes in the loom file.
             Values are the names of the attributes in the dataset.
@@ -106,8 +106,9 @@ class TranscriptomeTokenizer:
 
     def tokenize_files(self, loom_data_directory):
         tokenized_cells = []
-        loom_cell_attr = [attr_key for attr_key in self.custom_attr_name_dict.keys()]
-        cell_metadata = {attr_key: [] for attr_key in self.custom_attr_name_dict.values()}
+        if self.custom_attr_name_dict is not None:
+            loom_cell_attr = [attr_key for attr_key in self.custom_attr_name_dict.keys()]
+            cell_metadata = {attr_key: [] for attr_key in self.custom_attr_name_dict.values()}
 
         # loops through directories to tokenize .loom files
         for loom_file_path in loom_data_directory.glob("*.loom"):
@@ -116,15 +117,19 @@ class TranscriptomeTokenizer:
                 loom_file_path
             )
             tokenized_cells += file_tokenized_cells
-            for k in loom_cell_attr:
-                cell_metadata[self.custom_attr_name_dict[k]] += file_cell_metadata[k]
+            if self.custom_attr_name_dict is not None:
+                for k in loom_cell_attr:
+                    cell_metadata[self.custom_attr_name_dict[k]] += file_cell_metadata[k]
+            else:
+                cell_metadata = None
 
         return tokenized_cells, cell_metadata
 
     def tokenize_file(self, loom_file_path):
-        file_cell_metadata = {
-            attr_key: [] for attr_key in self.custom_attr_name_dict.keys()
-        }
+        if self.custom_attr_name_dict is not None:
+            file_cell_metadata = {
+                attr_key: [] for attr_key in self.custom_attr_name_dict.keys()
+            }
 
         with lp.connect(str(loom_file_path)) as data:
             # define coordinates of detected protein-coding or miRNA genes and vector of their normalization factors
@@ -181,15 +186,19 @@ class TranscriptomeTokenizer:
                 ]
 
                 # add custom attributes for subview to dict
-                for k in file_cell_metadata.keys():
-                    file_cell_metadata[k] += subview.ca[k].tolist()
+                if self.custom_attr_name_dict is not None:
+                    for k in file_cell_metadata.keys():
+                        file_cell_metadata[k] += subview.ca[k].tolist()
+                else:
+                    file_cell_metadata = None
 
         return tokenized_cells, file_cell_metadata
 
     def create_dataset(self, tokenized_cells, cell_metadata):
         # create dict for dataset creation
         dataset_dict = {"input_ids": tokenized_cells}
-        dataset_dict.update(cell_metadata)
+        if self.custom_attr_name_dict is not None:
+            dataset_dict.update(cell_metadata)
 
         # create dataset
         output_dataset = Dataset.from_dict(dataset_dict)
