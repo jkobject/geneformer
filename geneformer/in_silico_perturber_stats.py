@@ -37,15 +37,15 @@ def invert_dict(dictionary):
     return {v: k for k, v in dictionary.items()}
 
 # read raw dictionary files
-def read_dictionaries(dir, cell_or_gene_emb, anchor_token):
+def read_dictionaries(input_data_directory, cell_or_gene_emb, anchor_token):
     file_found = 0
     file_path_list = []
     dict_list = []
-    for file in os.listdir(dir):
+    for file in os.listdir(input_data_directory):
         # process only _raw.pickle files
         if file.endswith("_raw.pickle"):
             file_found = 1
-            file_path_list += [f"{dir}/{file}"]
+            file_path_list += [f"{input_data_directory}/{file}"]
     for file_path in tqdm(file_path_list):
         with open(file_path, "rb") as fp:
             cos_sims_dict = pickle.load(fp)
@@ -146,6 +146,10 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model, genes_
         if alt_end_state_exists == True:
             cos_sims_full_df["Shift_to_goal_end"] = [goal_end for start_state,goal_end,alt_end in cos_shift_data] 
             cos_sims_full_df["Shift_to_alt_end"] = [alt_end for start_state,goal_end,alt_end in cos_shift_data]
+        
+        # sort by shift to desired state
+        cos_sims_full_df = cos_sims_full_df.sort_values(by=["Shift_to_goal_end"],
+                                                            ascending=[False])
         return cos_sims_full_df     
             
     elif genes_perturbed == "all":
