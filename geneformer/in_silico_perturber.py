@@ -58,6 +58,16 @@ def measure_length(example):
     example["length"] = len(example["input_ids"])
     return example
 
+def downsample_and_sort(data_shuffled, max_ncells):
+    num_cells = len(data_shuffled)
+    # if max number of cells is defined, then subsample to this max number
+    if max_ncells != None:
+        num_cells = min(max_ncells,num_cells)
+    data_subset = data_shuffled.select([i for i in range(num_cells)])
+    # sort dataset with largest cell first to encounter any memory errors earlier
+    data_sorted = data_subset.sort("length",reverse=True)
+    return data_sorted
+
 def forward_pass_single_cell(model, example_cell, layer_to_quant):
     example_cell.set_format(type="torch")
     input_data = example_cell["input_ids"]
@@ -75,8 +85,8 @@ def perturb_emb_by_index(emb, indices):
     return emb[mask]
 
 def delete_indices(example):	
-    indices = example["perturb_index"]	
-    if len(indices)>1:	
+    indices = example["perturb_index"]
+    if any(isinstance(el, list) for el in indices):
         indices = flatten_list(indices)	
     for index in sorted(indices, reverse=True):	
         del example["input_ids"][index]	
@@ -84,10 +94,10 @@ def delete_indices(example):
 
 # for genes_to_perturb = "all" where only genes within cell are overexpressed
 def overexpress_indices(example):
-    indexes = example["perturb_index"]
-    if len(indexes)>1:
-        indexes = flatten_list(indexes)
-    for index in sorted(indexes, reverse=True):
+    indices = example["perturb_index"]
+    if any(isinstance(el, list) for el in indices):
+        indices = flatten_list(indices)
+    for index in sorted(indices, reverse=True):
         example["input_ids"].insert(0, example["input_ids"].pop(index))
     return example
 
@@ -165,7 +175,7 @@ def make_comparison_batch(original_emb_batch, indices_to_perturb, perturb_group)
             continue
         emb_list = []
         start = 0
-        if len(indices)>1 and isinstance(indices[0],list):
+        if any(isinstance(el, list) for el in indices):
             indices = flatten_list(indices)
         for i in sorted(indices):
             emb_list += [original_emb[start:i]]
@@ -724,8 +734,9 @@ class InSilicoPerturber:
             state_embs_dict = None
         else:
             # get dictionary of average cell state embeddings for comparison
+            downsampled_data = downsample_and_sort(filtered_input_data, self.max_ncells)
             state_embs_dict = get_cell_state_avg_embs(model,
-                                                      filtered_input_data,
+                                                      downsampled_data,
                                                       self.cell_states_to_model,
                                                       layer_to_quant,
                                                       self.pad_token_id,
@@ -758,14 +769,7 @@ class InSilicoPerturber:
                         "No cells remain after filtering. Check filtering criteria.")
                 raise
         data_shuffled = data.shuffle(seed=42)
-        num_cells = len(data_shuffled)
-        # if max number of cells is defined, then subsample to this max number
-        if self.max_ncells != None:
-            num_cells = min(self.max_ncells,num_cells)
-        data_subset = data_shuffled.select([i for i in range(num_cells)])
-        # sort dataset with largest cell first to encounter any memory errors earlier
-        data_sorted = data_subset.sort("length",reverse=True)
-        return data_sorted
+        return data_shuffled
     
     # load model to GPU
     def load_model(self, model_directory):
@@ -804,17 +808,29 @@ class InSilicoPerturber:
         if self.anchor_token is not None:
             def if_has_tokens_to_perturb(example):
                 return (len(set(example["input_ids"]).intersection(self.anchor_token))==len(self.anchor_token))
-            filtered_input_data = filtered_input_data.filter(if_has_tokens_to_perturb, num_proc=self.nproc)
-            logger.info(f"# cells with anchor gene: {len(filtered_input_data)}")
+            filtered_input_data = filtered_input_data.filter(if_has_tokens_to_perturb, num_proc=self.nproc) 
+            if len(filtered_input_data) == 0:
+                logger.error(
+                        "No cells in dataset contain anchor gene.")
+                raise
+            else:
+                logger.info(f"# cells with anchor gene: {len(filtered_input_data)}")
+            
         if (self.tokens_to_perturb != "all") and (self.perturb_type != "overexpress"):
             # minimum # genes needed for perturbation test
             min_genes = len(self.tokens_to_perturb)
+            
             def if_has_tokens_to_perturb(example):
-                return (len(set(example["input_ids"]).intersection(self.tokens_to_perturb))>min_genes)
+                return (len(set(example["input_ids"]).intersection(self.tokens_to_perturb))>=min_genes)
             filtered_input_data = filtered_input_data.filter(if_has_tokens_to_perturb, num_proc=self.nproc)
-        
+            if len(filtered_input_data) == 0:
+                logger.error(
+                        "No cells in dataset contain all genes to perturb as a group.")
+                raise
+            
         cos_sims_dict = defaultdict(list)
         pickle_batch = -1
+        filtered_input_data = downsample_and_sort(filtered_input_data, self.max_ncells)
         
         # make perturbation batch w/ single perturbation in multiple cells
         if self.perturb_group == True:
