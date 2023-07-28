@@ -17,9 +17,16 @@ Usage:
 import pickle
 from pathlib import Path
 
+import logging
+
+import warnings
+warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
+
 import loompy as lp
 import numpy as np
 from datasets import Dataset
+
+logger = logging.getLogger(__name__)
 
 GENE_MEDIAN_FILE = Path(__file__).parent / "gene_median_dictionary.pkl"
 TOKEN_DICTIONARY_FILE = Path(__file__).parent / "token_dictionary.pkl"
@@ -111,7 +118,9 @@ class TranscriptomeTokenizer:
             cell_metadata = {attr_key: [] for attr_key in self.custom_attr_name_dict.values()}
 
         # loops through directories to tokenize .loom files
+        file_found = 0
         for loom_file_path in loom_data_directory.glob("*.loom"):
+            file_found = 1
             print(f"Tokenizing {loom_file_path}")
             file_tokenized_cells, file_cell_metadata = self.tokenize_file(
                 loom_file_path
@@ -123,6 +132,10 @@ class TranscriptomeTokenizer:
             else:
                 cell_metadata = None
 
+        if file_found == 0:
+            logger.error(
+                f"No .loom files found in directory {loom_data_directory}.")
+            raise
         return tokenized_cells, cell_metadata
 
     def tokenize_file(self, loom_file_path):
