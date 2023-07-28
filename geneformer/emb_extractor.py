@@ -198,11 +198,9 @@ def plot_heatmap(embs_df, emb_dims, label, output_file, kwargs_dict):
 
     plt.setp(g.ax_row_colors.get_xmajorticklabels(), rotation=45, ha="right")
 
-    for label in list(label_color_dict.keys()):
-        g.ax_col_dendrogram.bar(0, 0, color=label_color_dict[label], label=label, linewidth=0)
+    for label_color in list(label_color_dict.keys()):
+        g.ax_col_dendrogram.bar(0, 0, color=label_color_dict[label_color], label=label_color, linewidth=0)
 
-        # g.ax_col_dendrogram.set_visible(False)
-        # g.ax_col_dendrogram.set_xlim([0,0])
         l1 = g.ax_col_dendrogram.legend(title=f"{label}", 
                                         loc="lower center", 
                                         ncol=4, 
