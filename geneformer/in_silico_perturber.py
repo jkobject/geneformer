@@ -41,6 +41,43 @@ from .tokenizer import TOKEN_DICTIONARY_FILE
 
 logger = logging.getLogger(__name__)
 
+
+# load data and filter by defined criteria
+def load_and_filter(filter_data, nproc, input_data_file):
+    data = load_from_disk(input_data_file)
+    if filter_data is not None:
+        for key,value in filter_data.items():
+            def filter_data_by_criteria(example):
+                return example[key] in value
+            data = data.filter(filter_data_by_criteria, num_proc=nproc)
+        if len(data) == 0:
+            logger.error(
+                    "No cells remain after filtering. Check filtering criteria.")
+            raise
+    data_shuffled = data.shuffle(seed=42)
+    return data_shuffled
+
+# load model to GPU
+def load_model(model_type, num_classes, model_directory):
+    if model_type == "Pretrained":
+        model = BertForMaskedLM.from_pretrained(model_directory, 
+                                                output_hidden_states=True, 
+                                                output_attentions=False)
+    elif model_type == "GeneClassifier":
+        model = BertForTokenClassification.from_pretrained(model_directory,
+                                                num_labels=num_classes,
+                                                output_hidden_states=True, 
+                                                output_attentions=False)
+    elif model_type == "CellClassifier":
+        model = BertForSequenceClassification.from_pretrained(model_directory, 
+                                                num_labels=num_classes,
+                                                output_hidden_states=True, 
+                                                output_attentions=False)
+    # put the model in eval mode for fwd pass
+    model.eval()
+    model = model.to("cuda:0")
+    return model
+
 def quant_layers(model):
     layer_nums = []
     for name, parameter in model.named_parameters():
@@ -726,8 +763,8 @@ class InSilicoPerturber:
             Prefix for output files
         """
 
-        filtered_input_data = self.load_and_filter(input_data_file)
-        model = self.load_model(model_directory)
+        filtered_input_data = load_and_filter(self.filter_data, self.nproc, input_data_file)
+        model = load_model(self.model_type, self.num_classes, model_directory)
         layer_to_quant = quant_layers(model)+self.emb_layer
         
         if self.cell_states_to_model is None:
@@ -755,42 +792,6 @@ class InSilicoPerturber:
                               state_embs_dict,
                               output_directory,
                               output_prefix)
-
-    # load data and filter by defined criteria
-    def load_and_filter(self, input_data_file):
-        data = load_from_disk(input_data_file)
-        if self.filter_data is not None:
-            for key,value in self.filter_data.items():
-                def filter_data_by_criteria(example):
-                    return example[key] in value
-                data = data.filter(filter_data_by_criteria, num_proc=self.nproc)
-            if len(data) == 0:
-                logger.error(
-                        "No cells remain after filtering. Check filtering criteria.")
-                raise
-        data_shuffled = data.shuffle(seed=42)
-        return data_shuffled
-    
-    # load model to GPU
-    def load_model(self, model_directory):
-        if self.model_type == "Pretrained":
-            model = BertForMaskedLM.from_pretrained(model_directory, 
-                                                    output_hidden_states=True, 
-                                                    output_attentions=False)
-        elif self.model_type == "GeneClassifier":
-            model = BertForTokenClassification.from_pretrained(model_directory,
-                                                    num_labels=self.num_classes,
-                                                    output_hidden_states=True, 
-                                                    output_attentions=False)
-        elif self.model_type == "CellClassifier":
-            model = BertForSequenceClassification.from_pretrained(model_directory, 
-                                                    num_labels=self.num_classes,
-                                                    output_hidden_states=True, 
-                                                    output_attentions=False)
-        # put the model in eval mode for fwd pass
-        model.eval()
-        model = model.to("cuda:0")
-        return model
     
     # determine effect of perturbation on other genes
     def in_silico_perturb(self,
