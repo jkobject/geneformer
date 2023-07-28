@@ -303,7 +303,14 @@ class EmbExtractor:
         
         
     def validate_options(self):
-        
+        # first disallow options under development
+        if self.emb_mode == "gene":
+            logger.error(
+                "Extraction and plotting of gene-level embeddings currently under development. " \
+                "Current valid option for 'emb_mode': 'cell'"
+            )
+            raise
+            
         # confirm arguments are within valid options and compatible with each other
         for attr_name,valid_options in self.valid_option_dict.items():
             attr_value = self.__dict__[attr_name]
