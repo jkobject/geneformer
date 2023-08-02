@@ -342,7 +342,6 @@ def quant_cos_sims(model,
         max_range = min(i+forward_batch_size, total_batch_length)
             
         perturbation_minibatch = perturbation_batch.select([i for i in range(i, max_range)])
-        
         # determine if need to pad or truncate batch
         minibatch_length_set = set(perturbation_minibatch["length"])
         minibatch_lengths = perturbation_minibatch["length"]
@@ -354,12 +353,14 @@ def quant_cos_sims(model,
 
         if needs_pad_or_trunc == True: 
             max_len = min(max(minibatch_length_set),model_input_size)
+            print(max_len)
             def pad_or_trunc_example(example):
                 example["input_ids"] = pad_or_truncate_encoding(example["input_ids"], 
                                                                pad_token_id, 
                                                                max_len)
                 return example
             perturbation_minibatch = perturbation_minibatch.map(pad_or_trunc_example, num_proc=nproc)
+            
         perturbation_minibatch.set_format(type="torch")
         
         input_data_minibatch = perturbation_minibatch["input_ids"]
@@ -570,6 +571,8 @@ def gen_attention_mask(minibatch_encoding, max_len = None):
     original_lens = minibatch_encoding["length"]
     attention_mask = [[1]*original_len
                       +[0]*(max_len - original_len)
+                      if original_len <= max_len
+                      else [1]*max_len
                       for original_len in original_lens]
     return torch.tensor(attention_mask).to("cuda")
 
