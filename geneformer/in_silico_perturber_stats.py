@@ -6,7 +6,10 @@ Usage:
   ispstats = InSilicoPerturberStats(mode="goal_state_shift",
                                     combos=0,
                                     anchor_gene=None,
-                                    cell_states_to_model={"disease":(["dcm"],["ctrl"],["hcm"])})
+                                    cell_states_to_model={"state_key": "disease", 
+                                                          "start_state": "dcm", 
+                                                          "goal_state": "nf", 
+                                                          "alt_states": ["hcm", "other1", "other2"]})
   ispstats.get_stats("path/to/input_data",
                      None,
                      "path/to/output_directory",
@@ -25,6 +28,8 @@ from pathlib import Path
 from scipy.stats import ranksums
 from sklearn.mixture import GaussianMixture
 from tqdm.notebook import trange, tqdm
+
+from .in_silico_perturber import flatten_list
 
 from .tokenizer import TOKEN_DICTIONARY_FILE
 
@@ -123,10 +128,10 @@ def isp_aggregate_grouped_perturb(cos_sims_df, dict_list):
 
 # stats comparing cos sim shifts towards goal state of test perturbations vs random perturbations
 def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model, genes_perturbed):
-    cell_state_key = list(cell_states_to_model.keys())[0]
-    if cell_states_to_model[cell_state_key][2] == []:
+    cell_state_key = cell_states_to_model["start_state"]
+    if "alt_states" not in cell_states_to_model.keys():
         alt_end_state_exists = False
-    elif (len(cell_states_to_model[cell_state_key][2]) > 0) and (cell_states_to_model[cell_state_key][2] != [None]):
+    elif (len(cell_states_to_model["alt_states"]) > 0) and (cell_states_to_model["alt_states"] != [None]):
         alt_end_state_exists = True
     
     # for single perturbation in multiple cells, there are no random perturbations to compare to
@@ -231,10 +236,12 @@ def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model, genes_
         # quantify number of detections of each gene
         cos_sims_full_df["N_Detections"] = [n_detections(i, dict_list, "cell", None) for i in cos_sims_full_df["Gene"]]
 
-        # sort by shift to desired state
-        cos_sims_full_df = cos_sims_full_df.sort_values(by=["Shift_to_goal_end",
+        # sort by shift to desired state\
+        cos_sims_full_df["Sig"] = [1 if fdr<0.05 else 0 for fdr in cos_sims_full_df["Goal_end_FDR"]]
+        cos_sims_full_df = cos_sims_full_df.sort_values(by=["Sig",
+                                                            "Shift_to_goal_end",
                                                             "Goal_end_FDR"],
-                                                            ascending=[False,True])
+                                                            ascending=[False,False,True])
     
         return cos_sims_full_df
 
@@ -272,9 +279,11 @@ def isp_stats_vs_null(cos_sims_df, dict_list, null_dict_list):
 
     cos_sims_full_df["Test_vs_null_FDR"] = get_fdr(cos_sims_full_df["Test_vs_null_pval"])
     
-    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Test_vs_null_avg_shift",
+    cos_sims_full_df["Sig"] = [1 if fdr<0.05 else 0 for fdr in cos_sims_full_df["Test_vs_null_FDR"]]  
+    cos_sims_full_df = cos_sims_full_df.sort_values(by=["Sig",
+                                                        "Test_vs_null_avg_shift",
                                                         "Test_vs_null_FDR"],
-                                                        ascending=[False,True])
+                                                        ascending=[False,False,True])
     return cos_sims_full_df
 
 # stats for identifying perturbations with largest effect within a given set of cells
@@ -441,9 +450,15 @@ class InSilicoPerturberStats:
                 analyzes data for the effect of anchor gene's perturbation on the embedding of each other gene.
         cell_states_to_model: None, dict
             Cell states to model if testing perturbations that achieve goal state change.
-            Single-item dictionary with key being cell attribute (e.g. "disease").
-            Value is tuple of three lists indicating start state, goal end state, and alternate possible end states.
-            If no alternate possible end states, third list should be empty (i.e. the third list should be []).
+            Four-item dictionary with keys: state_key, start_state, goal_state, and alt_states
+            state_key: key specifying name of column in .dataset that defines the start/goal states
+            start_state: value in the state_key column that specifies the start state
+            goal_state: value in the state_key column taht specifies the goal end state
+            alt_states: list of values in the state_key column that specify the alternate end states
+            For example: {"state_key": "disease",
+                          "start_state": "dcm",
+                          "goal_state": "nf",
+                          "alt_states": ["hcm", "other1", "other2"]}
         token_dictionary_file : Path
             Path to pickle file containing token dictionary (Ensembl ID:token).
         gene_name_id_dictionary_file : Path
@@ -494,6 +509,17 @@ class InSilicoPerturberStats:
         
         if self.cell_states_to_model is not None:
             if len(self.cell_states_to_model.items()) == 1:
+                logger.warning(
+                    "The single value dictionary for cell_states_to_model will be " \
+                    "replaced with a dictionary with named keys for start, goal, and alternate states. " \
+                    "Please specify state_key, start_state, goal_state, and alt_states " \
+                    "in the cell_states_to_model dictionary for future use. " \
+                    "For example, cell_states_to_model={" \
+                            "'state_key': 'disease', " \
+                            "'start_state': 'dcm', " \
+                            "'goal_state': 'nf', " \
+                            "'alt_states': ['hcm', 'other1', 'other2']}"
+                )
                 for key,value in self.cell_states_to_model.items():
                     if (len(value) == 3) and isinstance(value, tuple):
                         if isinstance(value[0],list) and isinstance(value[1],list) and isinstance(value[2],list):
@@ -501,14 +527,50 @@ class InSilicoPerturberStats:
                                 all_values = value[0]+value[1]+value[2]
                                 if len(all_values) == len(set(all_values)):
                                     continue
+                # reformat to the new named key format
+                state_values = flatten_list(list(self.cell_states_to_model.values()))
+                self.cell_states_to_model = {
+                    "state_key": list(self.cell_states_to_model.keys())[0],
+                    "start_state": state_values[0][0],
+                    "goal_state": state_values[1][0],
+                    "alt_states": state_values[2:][0]
+                }
+            elif set(self.cell_states_to_model.keys()) == {"state_key", "start_state", "goal_state", "alt_states"}:
+                if (self.cell_states_to_model["state_key"] is None) \
+                    or (self.cell_states_to_model["start_state"] is None) \
+                    or (self.cell_states_to_model["goal_state"] is None):
+                    logger.error(
+                        "Please specify 'state_key', 'start_state', and 'goal_state' in cell_states_to_model.")
+                    raise
+                
+                if self.cell_states_to_model["start_state"] == self.cell_states_to_model["goal_state"]:
+                    logger.error(
+                        "All states must be unique.")
+                    raise
+
+                if self.cell_states_to_model["alt_states"] is not None:
+                    if type(self.cell_states_to_model["alt_states"]) is not list:
+                        logger.error(
+                            "self.cell_states_to_model['alt_states'] must be a list (even if it is one element)."
+                        )
+                        raise
+                    if len(self.cell_states_to_model["alt_states"])!= len(set(self.cell_states_to_model["alt_states"])):
+                        logger.error(
+                            "All states must be unique.")
+                        raise
+
             else:
                 logger.error(
-                    "Cell states to model must be a single-item dictionary with " \
-                    "key being cell attribute (e.g. 'disease') and value being " \
-                    "tuple of three lists indicating start state, goal end state, and alternate possible end states. " \
-                    "Values should all be unique. " \
-                    "For example: {'disease':(['start_state'],['ctrl'],['alt_end'])}")
+                    "cell_states_to_model must only have the following four keys: " \
+                    "'state_key', 'start_state', 'goal_state', 'alt_states'." \
+                    "For example, cell_states_to_model={" \
+                            "'state_key': 'disease', " \
+                            "'start_state': 'dcm', " \
+                            "'goal_state': 'nf', " \
+                            "'alt_states': ['hcm', 'other1', 'other2']}"
+                )
                 raise
+
             if self.anchor_gene is not None:
                 self.anchor_gene = None
                 logger.warning(
@@ -565,6 +627,7 @@ class InSilicoPerturberStats:
         "Gene_name": gene name
         "Ensembl_ID": gene Ensembl ID
         "N_Detections": number of cells in which each gene or gene combination was detected in the input dataset
+        "Sig": 1 if FDR<0.05, otherwise 0
         
         "Shift_to_goal_end": cosine shift from start state towards goal end state in response to given perturbation
         "Shift_to_alt_end": cosine shift from start state towards alternate end state in response to given perturbation

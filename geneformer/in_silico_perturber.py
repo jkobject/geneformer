@@ -13,7 +13,7 @@ Usage:
                           emb_mode="cell",
                           cell_emb_style="mean_pool",
                           filter_data={"cell_type":["cardiomyocyte"]},
-                          cell_states_to_model={"disease":(["dcm"],["ctrl"],["hcm"])},
+                          cell_states_to_model={"state_key": "disease", "start_state": "dcm", "goal_state": "nf", "alt_states": ["hcm", "other1", "other2"]},
                           max_ncells=None,
                           emb_layer=-1,
                           forward_batch_size=100,
@@ -105,6 +105,13 @@ def downsample_and_sort(data_shuffled, max_ncells):
     data_sorted = data_subset.sort("length",reverse=True)
     return data_sorted
 
+def get_possible_states(cell_states_to_model):
+    possible_states = []
+    for key in ["start_state","goal_state"]:
+        possible_states += [cell_states_to_model[key]]
+    possible_states += cell_states_to_model.get("alt_states",[])
+    return possible_states
+
 def forward_pass_single_cell(model, example_cell, layer_to_quant):
     example_cell.set_format(type="torch")
     input_data = example_cell["input_ids"]
@@ -145,6 +152,21 @@ def overexpress_tokens(example):
         example = delete_indices(example)
     [example["input_ids"].insert(0, token) for token in example["tokens_to_perturb"][::-1]]
     return example
+
+def remove_indices_from_emb(emb, indices_to_remove, gene_dim):
+    # indices_to_remove is list of indices to remove
+    indices_to_keep = [i for i in range(emb.size()[gene_dim]) if i not in indices_to_remove]
+    num_dims = emb.dim()
+    emb_slice = [slice(None) if dim != gene_dim else indices_to_keep for dim in range(num_dims)]
+    sliced_emb = emb[emb_slice]
+    return sliced_emb
+
+def remove_indices_from_emb_batch(emb_batch, list_of_indices_to_remove, gene_dim):
+    output_batch = torch.stack([
+                    remove_indices_from_emb(emb_batch[i, :, :], idx, gene_dim-1) for 
+                    i, idx in enumerate(list_of_indices_to_remove)
+                    ])
+    return output_batch
 
 def make_perturbation_batch(example_cell, 
                             perturb_type, 
@@ -235,13 +257,15 @@ def get_cell_state_avg_embs(model,
                             num_proc):
     
     model_input_size = get_model_input_size(model)
-    possible_states = [value[0]+value[1]+value[2] for value in cell_states_to_model.values()][0]
+    possible_states = get_possible_states(cell_states_to_model)
     state_embs_dict = dict()
     for possible_state in possible_states:
         state_embs_list = []
+        original_lens = []
         
         def filter_states(example):
-            return example[list(cell_states_to_model.keys())[0]] in [possible_state]
+            state_key = cell_states_to_model["state_key"]
+            return example[state_key] in [possible_state]
         filtered_input_data_state = filtered_input_data.filter(filter_states, num_proc=num_proc)
         total_batch_length = len(filtered_input_data_state)
         if ((total_batch_length-1)/forward_batch_size).is_integer():
@@ -254,14 +278,17 @@ def get_cell_state_avg_embs(model,
             state_minibatch.set_format(type="torch")
             
             input_data_minibatch = state_minibatch["input_ids"]
+            original_lens += state_minibatch["length"]
             input_data_minibatch = pad_tensor_list(input_data_minibatch, 
                                                    max_len, 
                                                    pad_token_id, 
                                                    model_input_size)
+            attention_mask = gen_attention_mask(state_minibatch, max_len)
 
             with torch.no_grad():
                 outputs = model(
-                    input_ids = input_data_minibatch.to("cuda")
+                    input_ids = input_data_minibatch.to("cuda"),
+                    attention_mask = attention_mask
                 )
             
             state_embs_i = outputs.hidden_states[layer_to_quant]
@@ -269,10 +296,13 @@ def get_cell_state_avg_embs(model,
             del outputs
             del state_minibatch
             del input_data_minibatch
+            del attention_mask
             del state_embs_i
             torch.cuda.empty_cache()
-        state_embs_stack = torch.cat(state_embs_list)
-        avg_state_emb = torch.mean(state_embs_stack,dim=[0,1],keepdim=True)
+
+        state_embs = torch.cat(state_embs_list)
+        avg_state_emb = mean_nonpadding_embs(state_embs, torch.Tensor(original_lens).to("cuda"))
+        avg_state_emb = torch.mean(avg_state_emb, dim=0, keepdim=True)
         state_embs_dict[possible_state] = avg_state_emb
     return state_embs_dict
 
@@ -291,7 +321,6 @@ def quant_cos_sims(model,
                    pad_token_id,
                    model_input_size,
                    nproc):
-    
     cos = torch.nn.CosineSimilarity(dim=2)
     total_batch_length = len(perturbation_batch)
     if ((total_batch_length-1)/forward_batch_size).is_integer():
@@ -301,7 +330,7 @@ def quant_cos_sims(model,
             comparison_batch = make_comparison_batch(original_emb, indices_to_perturb, perturb_group)
         cos_sims = []
     else:
-        possible_states = [value[0]+value[1]+value[2] for value in cell_states_to_model.values()][0]
+        possible_states = get_possible_states(cell_states_to_model)
         cos_sims_vs_alt_dict = dict(zip(possible_states,[[] for i in range(len(possible_states))]))
     
     # measure length of each element in perturbation_batch
@@ -316,10 +345,12 @@ def quant_cos_sims(model,
         
         # determine if need to pad or truncate batch
         minibatch_length_set = set(perturbation_minibatch["length"])
+        minibatch_lengths = perturbation_minibatch["length"]
         if (len(minibatch_length_set) > 1) or (max(minibatch_length_set) > model_input_size):
             needs_pad_or_trunc = True
         else:
             needs_pad_or_trunc = False
+            max_len = max(minibatch_length_set)
 
         if needs_pad_or_trunc == True: 
             max_len = min(max(minibatch_length_set),model_input_size)
@@ -332,14 +363,17 @@ def quant_cos_sims(model,
         perturbation_minibatch.set_format(type="torch")
         
         input_data_minibatch = perturbation_minibatch["input_ids"]
+        attention_mask = gen_attention_mask(perturbation_minibatch, max_len)
         
         # extract embeddings for perturbation minibatch
         with torch.no_grad():
             outputs = model(
-                input_ids = input_data_minibatch.to("cuda")
+                input_ids = input_data_minibatch.to("cuda"),
+                attention_mask = attention_mask
             )
         del input_data_minibatch
         del perturbation_minibatch
+        del attention_mask
         
         if len(indices_to_perturb)>1:
             minibatch_emb = torch.squeeze(outputs.hidden_states[layer_to_quant])
@@ -360,6 +394,7 @@ def quant_cos_sims(model,
             # truncate to the (model input size - # tokens to overexpress) to ensure comparability
             # since max input size of perturb batch will be reduced by # tokens to overexpress 
             original_minibatch = original_emb.select([i for i in range(i, max_range)])
+            original_minibatch_lengths = original_minibatch["length"]
             original_minibatch_length_set = set(original_minibatch["length"])
             if perturb_type == "overexpress":
                 new_max_len = model_input_size - len(tokens_to_perturb)
@@ -373,19 +408,30 @@ def quant_cos_sims(model,
                 original_minibatch = original_minibatch.map(pad_or_trunc_example, num_proc=nproc)
             original_minibatch.set_format(type="torch")
             original_input_data_minibatch = original_minibatch["input_ids"]
+            attention_mask = gen_attention_mask(original_minibatch, original_max_len)
             # extract embeddings for original minibatch
             with torch.no_grad():
                 original_outputs = model(
-                    input_ids = original_input_data_minibatch.to("cuda")
+                    input_ids = original_input_data_minibatch.to("cuda"),
+                    attention_mask = attention_mask
                 )
             del original_input_data_minibatch
             del original_minibatch
+            del attention_mask
 
             if len(indices_to_perturb)>1:
                 original_minibatch_emb = torch.squeeze(original_outputs.hidden_states[layer_to_quant])
             else:
                 original_minibatch_emb = original_outputs.hidden_states[layer_to_quant]
-        
+
+            # embedding dimension of the genes
+            gene_dim = 1
+            # exclude overexpression due to case when genes are not expressed but being overexpressed
+            if perturb_type != "overexpress":
+                original_minibatch_emb = remove_indices_from_emb_batch(original_minibatch_emb, 
+                                                                       indices_to_perturb, 
+                                                                       gene_dim)
+
         # cosine similarity between original emb and batch items
         if cell_states_to_model is None:
             if perturb_group == False:
@@ -394,6 +440,7 @@ def quant_cos_sims(model,
                 minibatch_comparison = make_comparison_batch(original_minibatch_emb, 
                                                              indices_to_perturb,
                                                              perturb_group)
+
             cos_sims += [cos(minibatch_emb, minibatch_comparison).to("cpu")]
         elif cell_states_to_model is not None:
             for state in possible_states:
@@ -406,7 +453,9 @@ def quant_cos_sims(model,
                     cos_sims_vs_alt_dict[state] += cos_sim_shift(original_minibatch_emb, 
                                                                 minibatch_emb, 
                                                                 state_embs_dict[state],
-                                                                perturb_group)                    
+                                                                perturb_group,
+                                                                torch.tensor(original_minibatch_lengths, device="cuda"),
+                                                                torch.tensor(minibatch_lengths, device="cuda"))                    
         del outputs
         del minibatch_emb
         if cell_states_to_model is None:
@@ -421,14 +470,41 @@ def quant_cos_sims(model,
         return cos_sims_vs_alt_dict
 
 # calculate cos sim shift of perturbation with respect to origin and alternative cell
-def cos_sim_shift(original_emb, minibatch_emb, alt_emb, perturb_group):
+def cos_sim_shift(original_emb, 
+                  minibatch_emb, 
+                  end_emb, 
+                  perturb_group, 
+                  original_minibatch_lengths = None, 
+                  minibatch_lengths = None):
     cos = torch.nn.CosineSimilarity(dim=2)
-    original_emb = torch.mean(original_emb,dim=0,keepdim=True)
-    if perturb_group == False:
+    if not perturb_group:
+        original_emb = torch.mean(original_emb,dim=0,keepdim=True)
         original_emb = original_emb[None, :]
-    origin_v_end = cos(original_emb,alt_emb)
-    perturb_emb = torch.mean(minibatch_emb,dim=1,keepdim=True)
-    perturb_v_end = cos(perturb_emb,alt_emb)
+        origin_v_end = torch.squeeze(cos(original_emb, end_emb)) #test
+    else:
+        if original_emb.size() != minibatch_emb.size():
+            logger.error(
+                f"Embeddings are not the same dimensions. " \
+                f"original_emb is {original_emb.size()}. " \
+                f"minibatch_emb is {minibatch_emb.size()}. "
+            )
+            raise
+
+        if original_minibatch_lengths is not None:
+            original_emb = mean_nonpadding_embs(original_emb, original_minibatch_lengths)
+        # else:
+        #     original_emb = torch.mean(original_emb,dim=1,keepdim=True)
+
+        end_emb = torch.unsqueeze(end_emb, 1)
+        origin_v_end = cos(original_emb, end_emb)
+        origin_v_end = torch.squeeze(origin_v_end)
+    if minibatch_lengths is not None:
+        perturb_emb = mean_nonpadding_embs(minibatch_emb, minibatch_lengths)
+    else:
+        perturb_emb = torch.mean(minibatch_emb,dim=1,keepdim=True)
+
+    perturb_v_end = cos(perturb_emb, end_emb)
+    perturb_v_end = torch.squeeze(perturb_v_end)
     return [(perturb_v_end-origin_v_end).to("cpu")]
 
 def pad_list(input_ids, pad_token_id, max_len):
@@ -487,6 +563,30 @@ def pad_tensor_list(tensor_list, dynamic_or_constant, pad_token_id, model_input_
 
     # return stacked tensors
     return torch.stack(tensor_list)
+
+def gen_attention_mask(minibatch_encoding, max_len = None):
+    if max_len == None:
+        max_len = max(minibatch_encoding["length"])
+    original_lens = minibatch_encoding["length"]
+    attention_mask = [[1]*original_len
+                      +[0]*(max_len - original_len)
+                      for original_len in original_lens]
+    return torch.tensor(attention_mask).to("cuda")
+
+# get cell embeddings excluding padding
+def mean_nonpadding_embs(embs, original_lens):
+    # mask based on padding lengths
+    mask = torch.arange(embs.size(1)).unsqueeze(0).to("cuda") < original_lens.unsqueeze(1)
+
+    # extend mask dimensions to match the embeddings tensor
+    mask = mask.unsqueeze(2).expand_as(embs)
+
+    # use the mask to zero out the embeddings in padded areas
+    masked_embs = embs * mask.float()
+
+    # sum and divide by the lengths to get the mean of non-padding embs
+    mean_embs = masked_embs.sum(1) / original_lens.view(-1, 1).float()
+    return mean_embs
 
 class InSilicoPerturber:
     valid_option_dict = {
@@ -573,9 +673,15 @@ class InSilicoPerturber:
             Otherwise, dictionary specifying .dataset column name and list of values to filter by.
         cell_states_to_model: None, dict
             Cell states to model if testing perturbations that achieve goal state change.
-            Single-item dictionary with key being cell attribute (e.g. "disease").
-            Value is tuple of three lists indicating start state, goal end state, and alternate possible end states.
-            If no alternate possible end states, third list should be empty (i.e. the third list should be []).
+            Four-item dictionary with keys: state_key, start_state, goal_state, and alt_states
+            state_key: key specifying name of column in .dataset that defines the start/goal states
+            start_state: value in the state_key column that specifies the start state
+            goal_state: value in the state_key column taht specifies the goal end state
+            alt_states: list of values in the state_key column that specify the alternate end states
+            For example: {"state_key": "disease",
+                          "start_state": "dcm",
+                          "goal_state": "nf",
+                          "alt_states": ["hcm", "other1", "other2"]}
         max_ncells : None, int
             Maximum number of cells to test.
             If None, will test all cells.
@@ -706,6 +812,17 @@ class InSilicoPerturber:
         
         if self.cell_states_to_model is not None:
             if len(self.cell_states_to_model.items()) == 1:
+                logger.warning(
+                    "The single value dictionary for cell_states_to_model will be " \
+                    "replaced with a dictionary with named keys for start, goal, and alternate states. " \
+                    "Please specify state_key, start_state, goal_state, and alt_states " \
+                    "in the cell_states_to_model dictionary for future use. " \
+                    "For example, cell_states_to_model={" \
+                            "'state_key': 'disease', " \
+                            "'start_state': 'dcm', " \
+                            "'goal_state': 'nf', " \
+                            "'alt_states': ['hcm', 'other1', 'other2']}"
+                )
                 for key,value in self.cell_states_to_model.items():
                     if (len(value) == 3) and isinstance(value, tuple):
                         if isinstance(value[0],list) and isinstance(value[1],list) and isinstance(value[2],list):
@@ -713,14 +830,50 @@ class InSilicoPerturber:
                                 all_values = value[0]+value[1]+value[2]
                                 if len(all_values) == len(set(all_values)):
                                     continue
+                # reformat to the new named key format
+                state_values = flatten_list(list(self.cell_states_to_model.values()))
+                self.cell_states_to_model = {
+                    "state_key": list(self.cell_states_to_model.keys())[0],
+                    "start_state": state_values[0][0],
+                    "goal_state": state_values[1][0],
+                    "alt_states": state_values[2:][0]
+                }
+            elif set(self.cell_states_to_model.keys()) == {"state_key", "start_state", "goal_state", "alt_states"}:
+                if (self.cell_states_to_model["state_key"] is None) \
+                    or (self.cell_states_to_model["start_state"] is None) \
+                    or (self.cell_states_to_model["goal_state"] is None):
+                    logger.error(
+                        "Please specify 'state_key', 'start_state', and 'goal_state' in cell_states_to_model.")
+                    raise
+                
+                if self.cell_states_to_model["start_state"] == self.cell_states_to_model["goal_state"]:
+                    logger.error(
+                        "All states must be unique.")
+                    raise
+
+                if self.cell_states_to_model["alt_states"] is not None:
+                    if type(self.cell_states_to_model["alt_states"]) is not list:
+                        logger.error(
+                            "self.cell_states_to_model['alt_states'] must be a list (even if it is one element)."
+                        )
+                        raise
+                    if len(self.cell_states_to_model["alt_states"])!= len(set(self.cell_states_to_model["alt_states"])):
+                        logger.error(
+                            "All states must be unique.")
+                        raise
+
             else:
                 logger.error(
-                    "Cell states to model must be a single-item dictionary with " \
-                    "key being cell attribute (e.g. 'disease') and value being " \
-                    "tuple of three lists indicating start state, goal end state, and alternate possible end states. " \
-                    "Values should all be unique. " \
-                    "For example: {'disease':(['dcm'],['ctrl'],['hcm'])}")
+                    "cell_states_to_model must only have the following four keys: " \
+                    "'state_key', 'start_state', 'goal_state', 'alt_states'." \
+                    "For example, cell_states_to_model={" \
+                            "'state_key': 'disease', " \
+                            "'start_state': 'dcm', " \
+                            "'goal_state': 'nf', " \
+                            "'alt_states': ['hcm', 'other1', 'other2']}"
+                )
                 raise
+
             if self.anchor_gene is not None:
                 self.anchor_gene = None
                 logger.warning(
@@ -770,6 +923,14 @@ class InSilicoPerturber:
         if self.cell_states_to_model is None:
             state_embs_dict = None
         else:
+            # confirm that all states are valid to prevent futile filtering
+            state_name = self.cell_states_to_model["state_key"]
+            state_values = filtered_input_data[state_name]
+            for value in get_possible_states(self.cell_states_to_model):
+                if value not in state_values:
+                    logger.error(
+                        f"{value} is not present in the dataset's {state_name} attribute.")
+                    raise
             # get dictionary of average cell state embeddings for comparison
             downsampled_data = downsample_and_sort(filtered_input_data, self.max_ncells)
             state_embs_dict = get_cell_state_avg_embs(model,
@@ -780,9 +941,9 @@ class InSilicoPerturber:
                                                       self.forward_batch_size,
                                                       self.nproc)
             # filter for start state cells
-            start_state = list(self.cell_states_to_model.values())[0][0][0]
+            start_state = self.cell_states_to_model["start_state"]
             def filter_for_origin(example):
-                return example[list(self.cell_states_to_model.keys())[0]] in [start_state]
+                return example[state_name] in [start_state]
             
             filtered_input_data = filtered_input_data.filter(filter_for_origin, num_proc=self.nproc)
             
@@ -878,7 +1039,6 @@ class InSilicoPerturber:
                 # or (perturbed_genes, "cell_emb") for avg cell emb change
                 cos_sims_data = cos_sims_data.to("cuda")
                 max_padded_len = cos_sims_data.shape[1]
-
                 for j in range(cos_sims_data.shape[0]):
                     # remove padding before mean pooling cell embedding
                     original_length = original_lengths[j]
@@ -900,21 +1060,13 @@ class InSilicoPerturber:
                 # update cos sims dict
                 # key is tuple of (perturbed_genes, "cell_emb")
                 # value is list of tuples of cos sims for cell_states_to_model
-                origin_state_key = [value[0] for value in self.cell_states_to_model.values()][0][0]
+                origin_state_key = self.cell_states_to_model["start_state"]
                 cos_sims_origin = cos_sims_data[origin_state_key]
                 for j in range(cos_sims_origin.shape[0]):
-                    original_length = original_lengths[j]
-                    max_padded_len = cos_sims_origin.shape[1]
-                    indices_removed = indices_to_perturb[j]
-                    padding_to_remove = max_padded_len - (original_length \
-                                                          - len(self.tokens_to_perturb) \
-                                                          - len(indices_removed))
                     data_list = []
                     for data in list(cos_sims_data.values()):
                         data_item = data.to("cuda")
-                        nonpadding_data_item = data_item[j][:-padding_to_remove]
-                        cell_data = torch.mean(nonpadding_data_item).item()
-                        data_list += [cell_data]
+                        data_list += [data_item[j].item()]
                     cos_sims_dict[(perturbed_genes, "cell_emb")] += [tuple(data_list)]
             
             with open(f"{output_path_prefix}_raw.pickle", "wb") as fp:
@@ -987,7 +1139,7 @@ class InSilicoPerturber:
                             # update cos sims dict
                             # key is tuple of (perturbed_gene, "cell_emb")
                             # value is list of tuples of cos sims for cell_states_to_model
-                            origin_state_key = [value[0] for value in self.cell_states_to_model.values()][0][0]
+                            origin_state_key = self.cell_states_to_model["start_state"]
                             cos_sims_origin = cos_sims_data[origin_state_key]
 
                             for j in range(cos_sims_origin.shape[0]):
@@ -1109,4 +1261,3 @@ class InSilicoPerturber:
             # save remainder cells
             with open(f"{output_path_prefix}{pickle_batch}_raw.pickle", "wb") as fp:
                 pickle.dump(cos_sims_dict, fp)
-            

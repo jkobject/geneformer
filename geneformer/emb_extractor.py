@@ -43,31 +43,16 @@ from transformers import BertForMaskedLM, BertForTokenClassification, BertForSeq
 
 from .tokenizer import TOKEN_DICTIONARY_FILE
 
-from .in_silico_perturber import load_and_filter, \
-                                 downsample_and_sort, \
+from .in_silico_perturber import downsample_and_sort, \
+                                 gen_attention_mask, \
+                                 get_model_input_size, \
+                                 load_and_filter, \
                                  load_model, \
-                                 quant_layers, \
-                                 downsample_and_sort, \
+                                 mean_nonpadding_embs, \
                                  pad_tensor_list, \
-                                 get_model_input_size
-                                 
+                                 quant_layers
 
 logger = logging.getLogger(__name__)
-
-# get cell embeddings excluding padding
-def mean_nonpadding_embs(embs, original_lens):
-    # mask based on padding lengths
-    mask = torch.arange(embs.size(1)).unsqueeze(0).to("cuda") < original_lens.unsqueeze(1)
-
-    # extend mask dimensions to match the embeddings tensor
-    mask = mask.unsqueeze(2).expand_as(embs)
-
-    # use the mask to zero out the embeddings in padded areas
-    masked_embs = embs * mask.float()
-
-    # sum and divide by the lengths to get the mean of non-padding embs
-    mean_embs = masked_embs.sum(1) / original_lens.view(-1, 1).float()
-    return mean_embs
 
 # average embedding position of goal cell states
 def get_embs(model,
@@ -99,7 +84,8 @@ def get_embs(model,
 
         with torch.no_grad():
             outputs = model(
-                input_ids = input_data_minibatch.to("cuda")
+                input_ids = input_data_minibatch.to("cuda"),
+                attention_mask = gen_attention_mask(minibatch)
             )
         
         embs_i = outputs.hidden_states[layer_to_quant]
