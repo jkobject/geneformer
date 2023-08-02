@@ -353,7 +353,6 @@ def quant_cos_sims(model,
 
         if needs_pad_or_trunc == True: 
             max_len = min(max(minibatch_length_set),model_input_size)
-            print(max_len)
             def pad_or_trunc_example(example):
                 example["input_ids"] = pad_or_truncate_encoding(example["input_ids"], 
                                                                pad_token_id, 
