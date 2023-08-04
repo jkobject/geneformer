@@ -129,7 +129,9 @@ def isp_aggregate_grouped_perturb(cos_sims_df, dict_list):
 # stats comparing cos sim shifts towards goal state of test perturbations vs random perturbations
 def isp_stats_to_goal_state(cos_sims_df, dict_list, cell_states_to_model, genes_perturbed):
     cell_state_key = cell_states_to_model["start_state"]
-    if "alt_states" not in cell_states_to_model.keys():
+    if ("alt_states" not in cell_states_to_model.keys())
+        or (len(cell_states_to_model["alt_states"]) == 0)
+        or (cell_states_to_model["alt_states"] == [None]):
         alt_end_state_exists = False
     elif (len(cell_states_to_model["alt_states"]) > 0) and (cell_states_to_model["alt_states"] != [None]):
         alt_end_state_exists = True
