@@ -604,6 +604,7 @@ class InSilicoPerturber:
         "filter_data": {None, dict},
         "cell_states_to_model": {None, dict},
         "max_ncells": {None, int},
+        "cell_inds_to_perturb": {"all", dict},
         "emb_layer": {-1, 0},
         "forward_batch_size": {int},
         "nproc": {int},
@@ -622,6 +623,7 @@ class InSilicoPerturber:
         filter_data=None,
         cell_states_to_model=None,
         max_ncells=None,
+        cell_inds_to_perturb="all",
         emb_layer=-1,
         forward_batch_size=100,
         nproc=4,
@@ -687,6 +689,13 @@ class InSilicoPerturber:
         max_ncells : None, int
             Maximum number of cells to test.
             If None, will test all cells.
+        cell_inds_to_perturb : "all", list
+            Default is perturbing each cell in the dataset.
+            Otherwise, may provide a dict of indices of cells to perturb with keys start_ind and end_ind.
+            start_ind: the first index to perturb.
+            end_ind: the last index to perturb (exclusive).
+            Indices will be selected *after* the filter_data criteria and sorting.
+            Useful for splitting extremely large datasets across separate GPUs.
         emb_layer : {-1, 0}
             Embedding layer to use for quantification.
             -1: 2nd to last layer (recommended for pretrained Geneformer)
@@ -723,6 +732,7 @@ class InSilicoPerturber:
         self.filter_data = filter_data
         self.cell_states_to_model = cell_states_to_model
         self.max_ncells = max_ncells
+        self.cell_inds_to_perturb = cell_inds_to_perturb
         self.emb_layer = emb_layer
         self.forward_batch_size = forward_batch_size
         self.nproc = nproc
@@ -886,7 +896,7 @@ class InSilicoPerturber:
         if self.perturb_type in ["inhibit","activate"]:
             if self.perturb_rank_shift is None:
                 logger.error(
-                    "If perturb type is inhibit or activate then " \
+                    "If perturb_type is inhibit or activate then " \
                     "quartile to shift by must be specified.")
                 raise
         
@@ -897,6 +907,18 @@ class InSilicoPerturber:
                     logger.warning(
                         "Values in filter_data dict must be lists. " \
                         f"Changing {key} value to list ([{value}]).")
+                    
+        if self.cell_inds_to_perturb != "all":
+            if set(self.cell_inds_to_perturb.keys()) != {"start", "end"}:
+                logger.error(
+                    "If cell_inds_to_perturb is a dictionary, keys must be 'start' and 'end'."
+                )
+                raise
+            if self.cell_inds_to_perturb["start"] < 0 or self.cell_inds_to_perturb["end"] < 0:
+                logger.error(
+                    'cell_inds_to_perturb must be positive.'
+                )
+                raise
 
     def perturb_data(self, 
                      model_directory,
@@ -995,6 +1017,15 @@ class InSilicoPerturber:
         cos_sims_dict = defaultdict(list)
         pickle_batch = -1
         filtered_input_data = downsample_and_sort(filtered_input_data, self.max_ncells)
+        if self.cell_inds_to_perturb != "all":
+            if self.cell_inds_to_perturb["start"] >= len(filtered_input_data):
+                logger.error("cell_inds_to_perturb['start'] is larger than the filtered dataset.")
+                raise
+            if self.cell_inds_to_perturb["end"] > len(filtered_input_data):
+                logger.warning("cell_inds_to_perturb['end'] is larger than the filtered dataset. \
+                               Setting to the end of the filtered dataset.")
+                self.cell_inds_to_perturb["end"] = len(filtered_input_data)
+            filtered_input_data = filtered_input_data.select([i for i in range(self.cell_inds_to_perturb["start"], self.cell_inds_to_perturb["end"])])
         
         # make perturbation batch w/ single perturbation in multiple cells
         if self.perturb_group == True:
