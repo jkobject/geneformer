@@ -123,17 +123,17 @@ def forward_pass_single_cell(model, example_cell, layer_to_quant):
     del outputs
     return emb
 
-def perturb_emb_by_index(emb, indices):	
-    mask = torch.ones(emb.numel(), dtype=torch.bool)	
-    mask[indices] = False	
+def perturb_emb_by_index(emb, indices): 
+    mask = torch.ones(emb.numel(), dtype=torch.bool)    
+    mask[indices] = False   
     return emb[mask]
 
-def delete_indices(example):	
+def delete_indices(example):    
     indices = example["perturb_index"]
     if any(isinstance(el, list) for el in indices):
-        indices = flatten_list(indices)	
-    for index in sorted(indices, reverse=True):	
-        del example["input_ids"][index]	
+        indices = flatten_list(indices) 
+    for index in sorted(indices, reverse=True): 
+        del example["input_ids"][index] 
     return example
 
 # for genes_to_perturb = "all" where only genes within cell are overexpressed
@@ -180,10 +180,10 @@ def make_perturbation_batch(example_cell,
         elif perturb_type in ["delete","inhibit"]:
             range_start = 0
         indices_to_perturb = [[i] for i in range(range_start,example_cell["length"][0])]
-    elif combo_lvl>0 and (anchor_token is not None):	
-        example_input_ids = example_cell["input_ids "][0]	
-        anchor_index = example_input_ids.index(anchor_token[0])	
-        indices_to_perturb = [sorted([anchor_index,i]) if i!=anchor_index else None for i in range(example_cell["length"][0])]	
+    elif combo_lvl>0 and (anchor_token is not None):    
+        example_input_ids = example_cell["input_ids "][0]   
+        anchor_index = example_input_ids.index(anchor_token[0]) 
+        indices_to_perturb = [sorted([anchor_index,i]) if i!=anchor_index else None for i in range(example_cell["length"][0])]  
         indices_to_perturb = [item for item in indices_to_perturb if item is not None]
     else:
         example_input_ids = example_cell["input_ids"][0]
@@ -398,7 +398,7 @@ def quant_cos_sims(model,
             original_minibatch_length_set = set(original_minibatch["length"])
 
             indices_to_perturb_minibatch = indices_to_perturb[i:i+forward_batch_size]
-
+            
             if perturb_type == "overexpress":
                 new_max_len = model_input_size - len(tokens_to_perturb)
             else:
@@ -440,9 +440,7 @@ def quant_cos_sims(model,
             if perturb_group == False:
                 minibatch_comparison = comparison_batch[i:max_range]
             elif perturb_group == True:
-                minibatch_comparison = make_comparison_batch(original_minibatch_emb, 
-                                                             indices_to_perturb_minibatch,
-                                                             perturb_group)
+                minibatch_comparison = original_minibatch_emb
 
             cos_sims += [cos(minibatch_emb, minibatch_comparison).to("cpu")]
         elif cell_states_to_model is not None:
