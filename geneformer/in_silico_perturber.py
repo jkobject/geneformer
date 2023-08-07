@@ -396,19 +396,22 @@ def quant_cos_sims(model,
             original_minibatch = original_emb.select([i for i in range(i, max_range)])
             original_minibatch_lengths = original_minibatch["length"]
             original_minibatch_length_set = set(original_minibatch["length"])
+
+            indices_to_perturb_minibatch = indices_to_perturb[i:i+forward_batch_size]
+
             if perturb_type == "overexpress":
                 new_max_len = model_input_size - len(tokens_to_perturb)
             else:
                 new_max_len = model_input_size
             if (len(original_minibatch_length_set) > 1) or (max(original_minibatch_length_set) > new_max_len):
-                original_max_len = min(max(original_minibatch_length_set),new_max_len)
+                new_max_len = min(max(original_minibatch_length_set),new_max_len)
                 def pad_or_trunc_example(example):
-                    example["input_ids"] = pad_or_truncate_encoding(example["input_ids"], pad_token_id, original_max_len)
+                    example["input_ids"] = pad_or_truncate_encoding(example["input_ids"], pad_token_id, new_max_len)
                     return example
                 original_minibatch = original_minibatch.map(pad_or_trunc_example, num_proc=nproc)
             original_minibatch.set_format(type="torch")
             original_input_data_minibatch = original_minibatch["input_ids"]
-            attention_mask = gen_attention_mask(original_minibatch, original_max_len)
+            attention_mask = gen_attention_mask(original_minibatch, new_max_len)
             # extract embeddings for original minibatch
             with torch.no_grad():
                 original_outputs = model(
@@ -429,7 +432,7 @@ def quant_cos_sims(model,
             # exclude overexpression due to case when genes are not expressed but being overexpressed
             if perturb_type != "overexpress":
                 original_minibatch_emb = remove_indices_from_emb_batch(original_minibatch_emb, 
-                                                                       indices_to_perturb, 
+                                                                       indices_to_perturb_minibatch, 
                                                                        gene_dim)
 
         # cosine similarity between original emb and batch items
@@ -438,7 +441,7 @@ def quant_cos_sims(model,
                 minibatch_comparison = comparison_batch[i:max_range]
             elif perturb_group == True:
                 minibatch_comparison = make_comparison_batch(original_minibatch_emb, 
-                                                             indices_to_perturb,
+                                                             indices_to_perturb_minibatch,
                                                              perturb_group)
 
             cos_sims += [cos(minibatch_emb, minibatch_comparison).to("cpu")]
