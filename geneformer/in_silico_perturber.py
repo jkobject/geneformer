@@ -151,6 +151,7 @@ def overexpress_tokens(example):
     if example["perturb_index"] != [-100]:
         example = delete_indices(example)
     [example["input_ids"].insert(0, token) for token in example["tokens_to_perturb"][::-1]]
+
     return example
 
 def remove_indices_from_emb(emb, indices_to_remove, gene_dim):
@@ -163,8 +164,8 @@ def remove_indices_from_emb(emb, indices_to_remove, gene_dim):
 
 def remove_indices_from_emb_batch(emb_batch, list_of_indices_to_remove, gene_dim):
     output_batch = torch.stack([
-                    remove_indices_from_emb(emb_batch[i, :, :], idx, gene_dim-1) for 
-                    i, idx in enumerate(list_of_indices_to_remove)
+                    remove_indices_from_emb(emb_batch[i, :, :], idxs, gene_dim-1) for 
+                    i, idxs in enumerate(list_of_indices_to_remove)
                     ])
     return output_batch
 
@@ -179,7 +180,7 @@ def make_perturbation_batch(example_cell,
             range_start = 1
         elif perturb_type in ["delete","inhibit"]:
             range_start = 0
-        indices_to_perturb = [[i] for i in range(range_start,example_cell["length"][0])]
+        indices_to_perturb = [[i] for i in range(range_start, example_cell["length"][0])]
     elif combo_lvl>0 and (anchor_token is not None):    
         example_input_ids = example_cell["input_ids "][0]   
         anchor_index = example_input_ids.index(anchor_token[0]) 
@@ -323,47 +324,52 @@ def quant_cos_sims(model,
                    nproc):
     cos = torch.nn.CosineSimilarity(dim=2)
     total_batch_length = len(perturbation_batch)
+
     if ((total_batch_length-1)/forward_batch_size).is_integer():
         forward_batch_size = forward_batch_size-1
+    
+    if perturb_group == False:
+        comparison_batch = make_comparison_batch(original_emb, indices_to_perturb, perturb_group)
+
     if cell_states_to_model is None:
-        if perturb_group == False: # (if perturb_group is True, original_emb is filtered_input_data)
-            comparison_batch = make_comparison_batch(original_emb, indices_to_perturb, perturb_group)
         cos_sims = []
     else:
         possible_states = get_possible_states(cell_states_to_model)
-        cos_sims_vs_alt_dict = dict(zip(possible_states,[[] for i in range(len(possible_states))]))
+        cos_sims_vs_alt_dict = dict(zip(possible_states,[[] for _ in range(len(possible_states))]))
     
     # measure length of each element in perturbation_batch
     perturbation_batch = perturbation_batch.map(
             measure_length, num_proc=nproc
         )
-    
-    for i in range(0, total_batch_length, forward_batch_size):
-        max_range = min(i+forward_batch_size, total_batch_length)
-            
-        perturbation_minibatch = perturbation_batch.select([i for i in range(i, max_range)])
-        # determine if need to pad or truncate batch
-        minibatch_length_set = set(perturbation_minibatch["length"])
-        minibatch_lengths = perturbation_minibatch["length"]
-        if (len(minibatch_length_set) > 1) or (max(minibatch_length_set) > model_input_size):
+
+    def compute_batch_embeddings(minibatch, _max_len = None):
+        minibatch_lengths = minibatch["length"]
+        minibatch_length_set = set(minibatch_lengths)
+        max_len = model_input_size
+
+        if (len(minibatch_length_set) > 1) or (max(minibatch_length_set) > max_len):
             needs_pad_or_trunc = True
         else:
             needs_pad_or_trunc = False
             max_len = max(minibatch_length_set)
 
-        if needs_pad_or_trunc == True: 
-            max_len = min(max(minibatch_length_set),model_input_size)
+
+        if needs_pad_or_trunc == True:
+            if _max_len is None:
+                max_len = min(max(minibatch_length_set), max_len)
+            else:
+                max_len = _max_len
             def pad_or_trunc_example(example):
                 example["input_ids"] = pad_or_truncate_encoding(example["input_ids"], 
                                                                pad_token_id, 
                                                                max_len)
                 return example
-            perturbation_minibatch = perturbation_minibatch.map(pad_or_trunc_example, num_proc=nproc)
+            minibatch = minibatch.map(pad_or_trunc_example, num_proc=nproc)
             
-        perturbation_minibatch.set_format(type="torch")
+        minibatch.set_format(type="torch")
         
-        input_data_minibatch = perturbation_minibatch["input_ids"]
-        attention_mask = gen_attention_mask(perturbation_minibatch, max_len)
+        input_data_minibatch = minibatch["input_ids"]
+        attention_mask = gen_attention_mask(minibatch, max_len)
         
         # extract embeddings for perturbation minibatch
         with torch.no_grad():
@@ -371,9 +377,13 @@ def quant_cos_sims(model,
                 input_ids = input_data_minibatch.to("cuda"),
                 attention_mask = attention_mask
             )
-        del input_data_minibatch
-        del perturbation_minibatch
-        del attention_mask
+
+        return outputs, max_len
+    
+    for i in range(0, total_batch_length, forward_batch_size):
+        max_range = min(i+forward_batch_size, total_batch_length)
+        perturbation_minibatch = perturbation_batch.select([i for i in range(i, max_range)])
+        outputs, mini_max_len = compute_batch_embeddings(perturbation_minibatch)
         
         if len(indices_to_perturb)>1:
             minibatch_emb = torch.squeeze(outputs.hidden_states[layer_to_quant])
@@ -386,7 +396,8 @@ def quant_cos_sims(model,
                 overexpressed_to_remove = 1
             if perturb_group == True:
                 overexpressed_to_remove = len(tokens_to_perturb)
-            minibatch_emb = minibatch_emb[:,overexpressed_to_remove:,:]
+            minibatch_emb = minibatch_emb[:, overexpressed_to_remove: ,:]
+                
 
         # if quantifying single perturbation in multiple different cells, pad original batch and extract embs
         if perturb_group == True:
@@ -394,56 +405,50 @@ def quant_cos_sims(model,
             # truncate to the (model input size - # tokens to overexpress) to ensure comparability
             # since max input size of perturb batch will be reduced by # tokens to overexpress 
             original_minibatch = original_emb.select([i for i in range(i, max_range)])
-            original_minibatch_lengths = original_minibatch["length"]
-            original_minibatch_length_set = set(original_minibatch["length"])
-
-            indices_to_perturb_minibatch = indices_to_perturb[i:i+forward_batch_size]
-            
-            if perturb_type == "overexpress":
-                new_max_len = model_input_size - len(tokens_to_perturb)
-            else:
-                new_max_len = model_input_size
-            if (len(original_minibatch_length_set) > 1) or (max(original_minibatch_length_set) > new_max_len):
-                new_max_len = min(max(original_minibatch_length_set),new_max_len)
-                def pad_or_trunc_example(example):
-                    example["input_ids"] = pad_or_truncate_encoding(example["input_ids"], pad_token_id, new_max_len)
-                    return example
-                original_minibatch = original_minibatch.map(pad_or_trunc_example, num_proc=nproc)
-            original_minibatch.set_format(type="torch")
-            original_input_data_minibatch = original_minibatch["input_ids"]
-            attention_mask = gen_attention_mask(original_minibatch, new_max_len)
-            # extract embeddings for original minibatch
-            with torch.no_grad():
-                original_outputs = model(
-                    input_ids = original_input_data_minibatch.to("cuda"),
-                    attention_mask = attention_mask
-                )
-            del original_input_data_minibatch
-            del original_minibatch
-            del attention_mask
+            original_outputs, orig_max_len = compute_batch_embeddings(original_minibatch, mini_max_len)
 
             if len(indices_to_perturb)>1:
                 original_minibatch_emb = torch.squeeze(original_outputs.hidden_states[layer_to_quant])
             else:
                 original_minibatch_emb = original_outputs.hidden_states[layer_to_quant]
 
-            # embedding dimension of the genes
-            gene_dim = 1
-            # exclude overexpression due to case when genes are not expressed but being overexpressed
-            if perturb_type != "overexpress":
-                original_minibatch_emb = remove_indices_from_emb_batch(original_minibatch_emb, 
-                                                                       indices_to_perturb_minibatch, 
-                                                                       gene_dim)
+            # if we overexpress genes that aren't already expressed,
+            # we need to remove genes to make sure the embeddings are of a consistent size
+            # get rid of the bottom n genes/padding since those will get truncated anyways
+            # multiple perturbations is more complicated because if 1 out of n perturbed genes is expressed
+            # the idxs will still not be [-100]
+            if len(tokens_to_perturb) == 1:
+                indices_to_perturb_minibatch = [idx if idx != [-100] else [orig_max_len - 1]
+                                                for idx in indices_to_perturb[i:max_range]]
+            else:
+                num_perturbed = len(tokens_to_perturb)
+                indices_to_perturb_minibatch = []
+                end_range = [i for i in range(orig_max_len - tokens_to_perturb, orig_max_len)]
+                for idx in indices_to_perturb[i:i+max_range]:
+                    if idx == [-100]:
+                        indices_to_perturb_minibatch.append(end_range)
+                    elif len(idx) < len(tokens_to_perturb):
+                        indices_to_perturb_minibatch.append(idx + end_range[-num_perturbed:])
+                    else:
+                        indices_to_perturb_minibatch.append(idx)
 
+            original_minibatch_emb = remove_indices_from_emb_batch(original_minibatch_emb, 
+                                                                   indices_to_perturb_minibatch, 
+                                                                   gene_dim=1)
+                
         # cosine similarity between original emb and batch items
         if cell_states_to_model is None:
             if perturb_group == False:
                 minibatch_comparison = comparison_batch[i:max_range]
             elif perturb_group == True:
                 minibatch_comparison = original_minibatch_emb
-
             cos_sims += [cos(minibatch_emb, minibatch_comparison).to("cpu")]
         elif cell_states_to_model is not None:
+            if perturb_group == False:
+                original_emb = comparison_batch[i:max_range]
+            else:
+                original_minibatch_lengths = torch.tensor(original_minibatch["length"], device="cuda")
+                minibatch_lengths = torch.tensor(perturbation_minibatch["length"], device="cuda")
             for state in possible_states:
                 if perturb_group == False:
                     cos_sims_vs_alt_dict[state] += cos_sim_shift(original_emb, 
@@ -455,12 +460,14 @@ def quant_cos_sims(model,
                                                                 minibatch_emb, 
                                                                 state_embs_dict[state],
                                                                 perturb_group,
-                                                                torch.tensor(original_minibatch_lengths, device="cuda"),
-                                                                torch.tensor(minibatch_lengths, device="cuda"))                    
+                                                                original_minibatch_lengths,
+                                                                minibatch_lengths)  
         del outputs
         del minibatch_emb
         if cell_states_to_model is None:
             del minibatch_comparison
+        if perturb_group == True:
+            del original_minibatch_emb
         torch.cuda.empty_cache()
     if cell_states_to_model is None:
         cos_sims_stack = torch.cat(cos_sims)
@@ -470,6 +477,7 @@ def quant_cos_sims(model,
             cos_sims_vs_alt_dict[state] = torch.cat(cos_sims_vs_alt_dict[state])
         return cos_sims_vs_alt_dict
 
+
 # calculate cos sim shift of perturbation with respect to origin and alternative cell
 def cos_sim_shift(original_emb, 
                   minibatch_emb, 
@@ -478,34 +486,32 @@ def cos_sim_shift(original_emb,
                   original_minibatch_lengths = None, 
                   minibatch_lengths = None):
     cos = torch.nn.CosineSimilarity(dim=2)
+    if original_emb.size() != minibatch_emb.size():
+        logger.error(
+            f"Embeddings are not the same dimensions. " \
+            f"original_emb is {original_emb.size()}. " \
+            f"minibatch_emb is {minibatch_emb.size()}. "
+        )
+        raise
     if not perturb_group:
-        original_emb = torch.mean(original_emb,dim=0,keepdim=True)
-        original_emb = original_emb[None, :]
-        origin_v_end = torch.squeeze(cos(original_emb, end_emb)) #test
+        original_emb = torch.mean(original_emb,dim=1,keepdim=True)        
+        origin_v_end = torch.squeeze(cos(original_emb, end_emb))
     else:
-        if original_emb.size() != minibatch_emb.size():
-            logger.error(
-                f"Embeddings are not the same dimensions. " \
-                f"original_emb is {original_emb.size()}. " \
-                f"minibatch_emb is {minibatch_emb.size()}. "
-            )
-            raise
-
         if original_minibatch_lengths is not None:
             original_emb = mean_nonpadding_embs(original_emb, original_minibatch_lengths)
         # else:
         #     original_emb = torch.mean(original_emb,dim=1,keepdim=True)
 
         end_emb = torch.unsqueeze(end_emb, 1)
-        origin_v_end = cos(original_emb, end_emb)
-        origin_v_end = torch.squeeze(origin_v_end)
+        origin_v_end = torch.squeeze(cos(original_emb, end_emb))
     if minibatch_lengths is not None:
         perturb_emb = mean_nonpadding_embs(minibatch_emb, minibatch_lengths)
     else:
         perturb_emb = torch.mean(minibatch_emb,dim=1,keepdim=True)
-
     perturb_v_end = cos(perturb_emb, end_emb)
     perturb_v_end = torch.squeeze(perturb_v_end)
+    if (perturb_v_end-origin_v_end).numel() == 1:
+        return [([perturb_v_end-origin_v_end]).to("cpu")]
     return [(perturb_v_end-origin_v_end).to("cpu")]
 
 def pad_list(input_ids, pad_token_id, max_len):
@@ -1152,7 +1158,11 @@ class InSilicoPerturber:
                                         j_index = torch.squeeze(j_index)
                                 else:
                                     j_index = torch.tensor([j])
-                                perturbed_gene = torch.index_select(gene_list, 0, j_index)
+
+                                if self.perturb_type in ("overexpress", "activate"):
+                                    perturbed_gene = torch.index_select(gene_list, 0, j_index + 1)
+                                else:
+                                    perturbed_gene = torch.index_select(gene_list, 0, j_index)
 
                                 if perturbed_gene.shape[0]==1:
                                     perturbed_gene = perturbed_gene.item()
@@ -1183,7 +1193,11 @@ class InSilicoPerturber:
                                         j_index = torch.squeeze(j_index)
                                 else:
                                     j_index = torch.tensor([j])
-                                perturbed_gene = torch.index_select(gene_list, 0, j_index)
+
+                                if self.perturb_type in ("overexpress", "activate"):
+                                    perturbed_gene = torch.index_select(gene_list, 0, j_index + 1)
+                                else:
+                                    perturbed_gene = torch.index_select(gene_list, 0, j_index)
 
                                 if perturbed_gene.shape[0]==1:
                                     perturbed_gene = perturbed_gene.item()
