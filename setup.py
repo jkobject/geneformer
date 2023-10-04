@@ -16,6 +16,7 @@ setup(
         "datasets",
         "loompy",
         "numpy",
+        "tdigest",
         "transformers",
     ],
 )

@@ -40,7 +40,7 @@ import seaborn as sns
 import torch
 from collections import Counter
 from pathlib import Path
-from tqdm.notebook import trange
+from tqdm.auto import trange
 from transformers import BertForMaskedLM, BertForTokenClassification, BertForSequenceClassification
 
 from .tokenizer import TOKEN_DICTIONARY_FILE
@@ -64,7 +64,6 @@ def get_embs(model,
              pad_token_id,
              forward_batch_size,
              summary_stat):
-    
     model_input_size = get_model_input_size(model)
     total_batch_length = len(filtered_input_data)
     
@@ -138,7 +137,7 @@ def test_emb(model, example, layer_to_quant):
     return embs_test.size()[2]
 
 def label_embs(embs, downsampled_data, emb_labels):
-    embs_df = pd.DataFrame(embs.cpu())
+    embs_df = pd.DataFrame(embs.cpu().numpy())
     if emb_labels is not None:
         for label in emb_labels:
             emb_label = downsampled_data[label]
@@ -367,7 +366,8 @@ class EmbExtractor:
                      model_directory,
                      input_data_file,
                      output_directory,
-                     output_prefix):
+                     output_prefix,
+                     output_torch_embs=False):
         """
         Extract embeddings from input data and save as results in output_directory.
 
@@ -381,6 +381,9 @@ class EmbExtractor:
             Path to directory where embedding data will be saved as csv
         output_prefix : str
             Prefix for output file
+        output_torch_embs : bool
+            Whether or not to also output the embeddings as a tensor.
+            Note, if true, will output embeddings as both dataframe and tensor.
         """
 
         filtered_input_data = load_and_filter(self.filter_data, self.nproc, input_data_file)
@@ -398,13 +401,16 @@ class EmbExtractor:
         if self.summary_stat is None:
             embs_df = label_embs(embs, downsampled_data, self.emb_label)
         elif self.summary_stat is not None:
-            embs_df = pd.DataFrame(embs.cpu()).T
+            embs_df = pd.DataFrame(embs.cpu().numpy()).T
 
         # save embeddings to output_path
         output_path = (Path(output_directory) / output_prefix).with_suffix(".csv")
         embs_df.to_csv(output_path)
-
-        return embs_df        
+        
+        if output_torch_embs == True:
+            return embs_df, embs
+        else:
+            return embs_df        
     
     def plot_embs(self,
                   embs, 

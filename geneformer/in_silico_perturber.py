@@ -34,7 +34,7 @@ import seaborn as sns; sns.set()
 import torch
 from collections import defaultdict
 from datasets import Dataset, load_from_disk
-from tqdm.notebook import trange
+from tqdm.auto import trange
 from transformers import BertForMaskedLM, BertForTokenClassification, BertForSequenceClassification
 
 from .tokenizer import TOKEN_DICTIONARY_FILE

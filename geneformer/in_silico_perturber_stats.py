@@ -27,7 +27,7 @@ import statsmodels.stats.multitest as smt
 from pathlib import Path
 from scipy.stats import ranksums
 from sklearn.mixture import GaussianMixture
-from tqdm.notebook import trange, tqdm
+from tqdm.auto import trange, tqdm
 
 from .in_silico_perturber import flatten_list
 
