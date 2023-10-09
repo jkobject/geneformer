@@ -49,8 +49,9 @@ Example applications demonstrated in [our manuscript](https://rdcu.be/ddrx0) inc
 In addition to the pretrained model, contained herein are functions for tokenizing and collating data specific to single cell transcriptomics, pretraining the model, fine-tuning the model, extracting and plotting cell embeddings, and performing in silico pertrubation with either the pretrained or fine-tuned models. To install:
 
 ```bash
+# Make sure you have git-lfs installed (https://git-lfs.com)
 git lfs install
-git clone git@hf.co:ctheodoris/Geneformer
+git clone https://huggingface.co/ctheodoris/Geneformer
 cd Geneformer
 pip install .
 ```
