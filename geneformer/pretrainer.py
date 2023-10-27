@@ -381,7 +381,7 @@ class GeneformerPreCollator(SpecialTokensMixin):
                 return_tensors = "tf" if return_tensors is None else return_tensors
             elif is_torch_available() and _is_torch(first_element):
                 return_tensors = "pt" if return_tensors is None else return_tensors
-            if isinstance(first_element, np.ndarray):
+            elif isinstance(first_element, np.ndarray):
                 return_tensors = "np" if return_tensors is None else return_tensors
             else:
                 raise ValueError(

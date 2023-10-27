@@ -10,7 +10,7 @@ import datetime
 import os
 
 os.environ["NCCL_DEBUG"] = "INFO"
-os.environ["OMPI_MCA_opal_cuda_support"] = "true"
+# os.environ["OMPI_MCA_opal_cuda_support"] = "true"
 os.environ["CONDA_OVERRIDE_GLIBC"] = "2.56"
 
 import pickle
@@ -30,7 +30,7 @@ random.seed(seed_num)
 np.random.seed(seed_num)
 seed_val = 42
 torch.manual_seed(seed_val)
-torch.cuda.manual_seed_all(seed_val)
+# torch.cuda.manual_seed_all(seed_val)
 
 # set local time/directories
 timezone = pytz.timezone("US/Eastern")
@@ -138,7 +138,9 @@ training_args = {
     "per_device_train_batch_size": geneformer_batch_size,
     "num_train_epochs": epochs,
     "save_strategy": "steps",
-    "save_steps": np.floor(num_examples / geneformer_batch_size / 8),  # 8 saves per epoch
+    "save_steps": np.floor(
+        num_examples / geneformer_batch_size / 8
+    ),  # 8 saves per epoch
     "logging_steps": 1000,
     "output_dir": training_output_dir,
     "logging_dir": logging_dir,
