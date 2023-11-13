@@ -163,3 +163,4 @@ examples/
 training/
 build/
 geneformer-12L-30M/
+fine_tuned_models/
