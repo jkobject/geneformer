@@ -34,6 +34,9 @@ def load_and_filter(filter_data, nproc, input_data_file):
 
 
 def filter_by_dict(data, filter_data, nproc):
+    import pdb
+
+    pdb.set_trace()
     for key, value in filter_data.items():
 
         def filter_data_by_criteria(example):
@@ -117,7 +120,7 @@ def load_model(model_type, num_classes, model_directory, mode, quantize=False):
         model_type = "MTLCellClassifier"
         quantize = True
 
-    output_hidden_states = (mode == "eval")
+    output_hidden_states = mode == "eval"
 
     # Quantization logic
     if quantize:
@@ -147,7 +150,7 @@ def load_model(model_type, num_classes, model_directory, mode, quantize=False):
         "Pretrained": BertForMaskedLM,
         "GeneClassifier": BertForTokenClassification,
         "CellClassifier": BertForSequenceClassification,
-        "MTLCellClassifier": BertForMaskedLM
+        "MTLCellClassifier": BertForMaskedLM,
     }
 
     model_class = model_classes.get(model_type)
@@ -184,6 +187,7 @@ def load_model(model_type, num_classes, model_directory, mode, quantize=False):
         model = get_peft_model(model, peft_config)
 
     return model
+
 
 def quant_layers(model):
     layer_nums = []

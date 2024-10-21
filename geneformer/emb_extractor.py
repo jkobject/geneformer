@@ -42,6 +42,7 @@ def get_embs(
     special_token=False,
     summary_stat=None,
     silent=False,
+    get_avg_attentions=False,
 ):
     model_input_size = pu.get_model_input_size(model)
     total_batch_length = len(filtered_input_data)
@@ -89,6 +90,7 @@ def get_embs(
             )
 
     overall_max_len = 0
+    avg_attentions = None
 
     for i in trange(0, total_batch_length, forward_batch_size, leave=(not silent)):
         max_range = min(i + forward_batch_size, total_batch_length)
@@ -103,14 +105,25 @@ def get_embs(
         input_data_minibatch = pu.pad_tensor_list(
             input_data_minibatch, max_len, pad_token_id, model_input_size
         )
-
         with torch.no_grad():
             outputs = model(
                 input_ids=input_data_minibatch.to("cuda"),
                 attention_mask=pu.gen_attention_mask(minibatch),
+                output_attentions=get_avg_attentions,
             )
 
         embs_i = outputs.hidden_states[layer_to_quant]
+        attentions = outputs.attentions
+        # Calculate the average of all attention heads
+        if get_avg_attentions:
+            import pdb
+
+            pdb.set_trace()
+            if avg_attentions is None:
+                avg_attentions = torch.mean(torch.stack(attentions), dim=(0, 1, 2))
+            else:
+                avg_attentions += torch.mean(torch.stack(attentions), dim=(0, 1, 2))
+        # This represents the average attention across all heads for each token pair
 
         if emb_mode == "cell":
             if cls_present:
@@ -198,7 +211,7 @@ def get_embs(
                 ]
             return embs_tdigests_dict
 
-    return embs_stack
+    return embs_stack, avg_attentions / len(embs_list) if get_avg_attentions else None
 
 
 def accumulate_tdigests(embs_tdigests, mean_embs, emb_dims):
@@ -562,6 +575,7 @@ class EmbExtractor:
         output_prefix,
         output_torch_embs=False,
         cell_state=None,
+        get_avg_attentions=False,
     ):
         """
         Extract embeddings from input data and save as results in output_directory.
@@ -605,7 +619,7 @@ class EmbExtractor:
             self.model_type, self.num_classes, model_directory, mode="eval"
         )
         layer_to_quant = pu.quant_layers(model) + self.emb_layer
-        embs = get_embs(
+        embs, avg_attentions = get_embs(
             model=model,
             filtered_input_data=downsampled_data,
             emb_mode=self.emb_mode,
@@ -614,6 +628,7 @@ class EmbExtractor:
             forward_batch_size=self.forward_batch_size,
             token_gene_dict=self.token_gene_dict,
             summary_stat=self.summary_stat,
+            get_avg_attentions=get_avg_attentions,
         )
 
         if self.emb_mode == "cell":
@@ -651,12 +666,12 @@ class EmbExtractor:
             ).T
 
         if cell_state is not None:
-            return embs
+            return embs, avg_attentions
         else:
             if output_torch_embs:
-                return embs_df, embs
+                return embs_df, embs, avg_attentions
             else:
-                return embs_df
+                return embs_df, avg_attentions
 
     def get_state_embs(
         self,
