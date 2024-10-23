@@ -763,6 +763,12 @@ class EmbExtractor:
             )
             raise
 
+        if self.emb_label is not None:
+            logger.error(
+                "For extracting state embs, emb_label should be None since labels are based on state embs dict keys."
+            )
+            raise
+        
         state_embs_dict = dict()
         state_key = cell_states_to_model["state_key"]
         for k, v in cell_states_to_model.items():
