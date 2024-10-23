@@ -34,9 +34,6 @@ def load_and_filter(filter_data, nproc, input_data_file):
 
 
 def filter_by_dict(data, filter_data, nproc):
-    import pdb
-
-    pdb.set_trace()
     for key, value in filter_data.items():
 
         def filter_data_by_criteria(example):

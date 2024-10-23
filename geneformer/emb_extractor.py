@@ -43,6 +43,7 @@ def get_embs(
     summary_stat=None,
     silent=False,
     get_avg_attentions=False,
+    genelist=None,
 ):
     model_input_size = pu.get_model_input_size(model)
     total_batch_length = len(filtered_input_data)
@@ -90,7 +91,8 @@ def get_embs(
             )
 
     overall_max_len = 0
-    avg_attentions = None
+    if get_avg_attentions:
+        avg_attentions = torch.zeros((len(genelist), len(genelist)), device="cuda")
 
     for i in trange(0, total_batch_length, forward_batch_size, leave=(not silent)):
         max_range = min(i + forward_batch_size, total_batch_length)
@@ -116,13 +118,35 @@ def get_embs(
         attentions = outputs.attentions
         # Calculate the average of all attention heads
         if get_avg_attentions:
-            import pdb
+            # avg across heads
+            # sum across cells
+            attentions = torch.mean(torch.stack(attentions), dim=(0, 2))
+            del outputs
+            torch.cuda.empty_cache()
+            # Create a mapping from token IDs to genelist indices
+            token_to_loc = {tok_id: i for i, tok_id in enumerate(genelist)}
 
-            pdb.set_trace()
-            if avg_attentions is None:
-                avg_attentions = torch.mean(torch.stack(attentions), dim=(0, 1, 2))
-            else:
-                avg_attentions += torch.mean(torch.stack(attentions), dim=(0, 1, 2))
+            # Create a tensor of genelist indices for each token in the batch
+            gene_indices = torch.tensor(
+                [
+                    [token_to_loc.get(token.item(), -1) for token in seq[1:-1]]
+                    for seq in input_data_minibatch
+                ],
+                device=attentions.device,
+            )
+
+            # Create a mask for valid gene indices
+            valid_mask = gene_indices != -1
+
+            # Use advanced indexing to map attention values to gene pairs
+            batch, seq_len, _ = attentions.shape
+            row_indices = gene_indices.unsqueeze(-1).expand(-1, -1, seq_len - 2)
+            col_indices = gene_indices.unsqueeze(1).expand(-1, seq_len - 2, -1)
+            avg_attentions.index_put_(
+                (row_indices[valid_mask], col_indices[valid_mask]),
+                attentions[:, 1:-1, 1:-1][valid_mask],
+                accumulate=True,
+            )
         # This represents the average attention across all heads for each token pair
 
         if emb_mode == "cell":
@@ -170,7 +194,8 @@ def get_embs(
             del cls_embs
 
         overall_max_len = max(overall_max_len, max_len)
-        del outputs
+        if not get_avg_attentions:
+            del outputs
         del minibatch
         del input_data_minibatch
         del embs_i
@@ -418,6 +443,7 @@ class EmbExtractor:
         "token_dictionary_file": {None, str},
         "nproc": {int},
         "summary_stat": {None, "mean", "median", "exact_mean", "exact_median"},
+        "genelist": {None, list},
     }
 
     def __init__(
@@ -436,6 +462,7 @@ class EmbExtractor:
         nproc=4,
         summary_stat=None,
         token_dictionary_file=None,
+        genelist=None,
     ):
         """
         Initialize embedding extractor.
@@ -518,6 +545,7 @@ class EmbExtractor:
         self.token_dictionary_file = token_dictionary_file
         self.forward_batch_size = forward_batch_size
         self.nproc = nproc
+        self.genelist = genelist
         if (summary_stat is not None) and ("exact" in summary_stat):
             self.summary_stat = None
             self.exact_summary_stat = summary_stat
@@ -629,6 +657,7 @@ class EmbExtractor:
             token_gene_dict=self.token_gene_dict,
             summary_stat=self.summary_stat,
             get_avg_attentions=get_avg_attentions,
+            genelist=self.genelist,
         )
 
         if self.emb_mode == "cell":
