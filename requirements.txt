@@ -22,4 +22,4 @@ tdigest>=0.5.2
 tensorboard>=2.15
 torch>=2.0.1
 tqdm>=4.65
-transformers>=4.28
+transformers>=4.40

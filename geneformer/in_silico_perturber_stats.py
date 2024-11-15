@@ -640,10 +640,16 @@ def isp_stats_mixture_model(cos_sims_df, dict_list, combos, anchor_token):
         cos_sims_full_df = pd.concat([cos_sims_full_df, cos_sims_df_i])
 
     # quantify number of detections of each gene
-    cos_sims_full_df["N_Detections"] = [
-        n_detections(i, dict_list, "gene", anchor_token)
-        for i in cos_sims_full_df["Gene"]
-    ]
+    if anchor_token is None:
+        cos_sims_full_df["N_Detections"] = [
+            n_detections(i, dict_list, "cell", anchor_token)
+            for i in cos_sims_full_df["Gene"]
+        ]
+    else:
+        cos_sims_full_df["N_Detections"] = [
+            n_detections(i, dict_list, "gene", anchor_token)
+            for i in cos_sims_full_df["Gene"]
+        ]
 
     if combos == 0:
         cos_sims_full_df = cos_sims_full_df.sort_values(
