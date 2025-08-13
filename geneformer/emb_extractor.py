@@ -93,6 +93,7 @@ def get_embs(
     overall_max_len = 0
     if get_avg_attentions:
         avg_attentions = torch.zeros((len(genelist), len(genelist)), device="cuda")
+        attention_counts = torch.zeros_like(avg_attentions)
 
     for i in trange(0, total_batch_length, forward_batch_size, leave=(not silent)):
         max_range = min(i + forward_batch_size, total_batch_length)
@@ -147,6 +148,13 @@ def get_embs(
                 attentions[:, 1:-1, 1:-1][valid_mask],
                 accumulate=True,
             )
+        # Compute which values were filled to calculate the mean
+        attention_counts.index_put_(
+            (row_indices[valid_mask], col_indices[valid_mask]),
+            torch.ones_like(attentions[:, 1:-1, 1:-1][valid_mask]),
+            accumulate=True,
+        )
+
         # This represents the average attention across all heads for each token pair
 
         if emb_mode == "cell":
@@ -235,8 +243,14 @@ def get_embs(
                     for gene in embs_tdigests_dict.keys()
                 ]
             return embs_tdigests_dict
-
-    return embs_stack, avg_attentions / len(embs_list) if get_avg_attentions else None
+    if get_avg_attentions:
+        # Avoid division by zero
+        attention_counts = torch.clamp(attention_counts, min=1)
+        # Calculate the mean attention
+        avg_attentions = avg_attentions / attention_counts
+    else:
+        avg_attentions = None
+    return embs_stack, avg_attentions
 
 
 def accumulate_tdigests(embs_tdigests, mean_embs, emb_dims):
@@ -768,7 +782,7 @@ class EmbExtractor:
                 "For extracting state embs, emb_label should be None since labels are based on state embs dict keys."
             )
             raise
-        
+
         state_embs_dict = dict()
         state_key = cell_states_to_model["state_key"]
         for k, v in cell_states_to_model.items():
