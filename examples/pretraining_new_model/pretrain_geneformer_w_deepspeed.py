@@ -10,7 +10,7 @@ import datetime
 import os
 
 os.environ["NCCL_DEBUG"] = "INFO"
-os.environ["OMPI_MCA_opal_cuda_support"] = "true"
+# os.environ["OMPI_MCA_opal_cuda_support"] = "true"
 os.environ["CONDA_OVERRIDE_GLIBC"] = "2.56"
 
 import pickle
@@ -30,7 +30,7 @@ random.seed(seed_num)
 np.random.seed(seed_num)
 seed_val = 42
 torch.manual_seed(seed_val)
-torch.cuda.manual_seed_all(seed_val)
+# torch.cuda.manual_seed_all(seed_val)
 
 # set local time/directories
 timezone = pytz.timezone("US/Eastern")

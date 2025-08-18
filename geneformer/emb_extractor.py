@@ -24,8 +24,25 @@ import torch
 from tdigest import TDigest
 from tqdm.auto import trange
 
-from . import TOKEN_DICTIONARY_FILE
 from . import perturber_utils as pu
+from transformers import (
+    BertForMaskedLM,
+    BertForTokenClassification,
+    BertForSequenceClassification,
+)
+
+from .tokenizer import TOKEN_DICTIONARY_FILE
+
+from .in_silico_perturber import (
+    downsample_and_sort,
+    gen_attention_mask,
+    get_model_input_size,
+    load_and_filter,
+    load_model,
+    mean_nonpadding_embs,
+    pad_tensor_list,
+    quant_layers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +55,9 @@ def get_embs(
     layer_to_quant,
     pad_token_id,
     forward_batch_size,
-    token_gene_dict,
-    special_token=False,
-    summary_stat=None,
-    silent=False,
-    get_avg_attentions=False,
-    genelist=None,
+    summary_stat,
 ):
-    model_input_size = pu.get_model_input_size(model)
+    model_input_size = get_model_input_size(model)
     total_batch_length = len(filtered_input_data)
 
     if summary_stat is None:
@@ -69,93 +81,26 @@ def get_embs(
                 k: [TDigest() for _ in range(emb_dims)] for k in gene_set
             }
 
-    # Check if CLS and EOS token is present in the token dictionary
-    cls_present = any("<cls>" in value for value in token_gene_dict.values())
-    eos_present = any("<eos>" in value for value in token_gene_dict.values())
-    if emb_mode == "cls":
-        assert cls_present, "<cls> token missing in token dictionary"
-        # Check to make sure that the first token of the filtered input data is cls token
-        gene_token_dict = {v: k for k, v in token_gene_dict.items()}
-        cls_token_id = gene_token_dict["<cls>"]
-        assert (
-            filtered_input_data["input_ids"][0][0] == cls_token_id
-        ), "First token is not <cls> token value"
-    elif emb_mode == "cell":
-        if cls_present:
-            logger.warning(
-                "CLS token present in token dictionary, excluding from average."
-            )
-        if eos_present:
-            logger.warning(
-                "EOS token present in token dictionary, excluding from average."
-            )
-
-    overall_max_len = 0
-    if get_avg_attentions:
-        avg_attentions = torch.zeros((len(genelist), len(genelist)), device="cuda")
-        attention_counts = torch.zeros_like(avg_attentions)
-
-    for i in trange(0, total_batch_length, forward_batch_size, leave=(not silent)):
+    for i in trange(0, total_batch_length, forward_batch_size):
         max_range = min(i + forward_batch_size, total_batch_length)
 
         minibatch = filtered_input_data.select([i for i in range(i, max_range)])
-
-        max_len = int(max(minibatch["length"]))
-        original_lens = torch.tensor(minibatch["length"], device="cuda")
+        max_len = max(minibatch["length"])
+        original_lens = torch.tensor(minibatch["length"]).to("cpu")
         minibatch.set_format(type="torch")
 
         input_data_minibatch = minibatch["input_ids"]
-        input_data_minibatch = pu.pad_tensor_list(
+        input_data_minibatch = pad_tensor_list(
             input_data_minibatch, max_len, pad_token_id, model_input_size
         )
+
         with torch.no_grad():
             outputs = model(
-                input_ids=input_data_minibatch.to("cuda"),
-                attention_mask=pu.gen_attention_mask(minibatch),
-                output_attentions=get_avg_attentions,
+                input_ids=input_data_minibatch.to("cpu"),
+                attention_mask=gen_attention_mask(minibatch),
             )
 
         embs_i = outputs.hidden_states[layer_to_quant]
-        attentions = outputs.attentions
-        # Calculate the average of all attention heads
-        if get_avg_attentions:
-            # avg across heads
-            # sum across cells
-            attentions = torch.mean(torch.stack(attentions), dim=(0, 2))
-            del outputs
-            torch.cuda.empty_cache()
-            # Create a mapping from token IDs to genelist indices
-            token_to_loc = {tok_id: i for i, tok_id in enumerate(genelist)}
-
-            # Create a tensor of genelist indices for each token in the batch
-            gene_indices = torch.tensor(
-                [
-                    [token_to_loc.get(token.item(), -1) for token in seq[1:-1]]
-                    for seq in input_data_minibatch
-                ],
-                device=attentions.device,
-            )
-
-            # Create a mask for valid gene indices
-            valid_mask = gene_indices != -1
-
-            # Use advanced indexing to map attention values to gene pairs
-            batch, seq_len, _ = attentions.shape
-            row_indices = gene_indices.unsqueeze(-1).expand(-1, -1, seq_len - 2)
-            col_indices = gene_indices.unsqueeze(1).expand(-1, seq_len - 2, -1)
-            avg_attentions.index_put_(
-                (row_indices[valid_mask], col_indices[valid_mask]),
-                attentions[:, 1:-1, 1:-1][valid_mask],
-                accumulate=True,
-            )
-        # Compute which values were filled to calculate the mean
-        attention_counts.index_put_(
-            (row_indices[valid_mask], col_indices[valid_mask]),
-            torch.ones_like(attentions[:, 1:-1, 1:-1][valid_mask]),
-            accumulate=True,
-        )
-
-        # This represents the average attention across all heads for each token pair
 
         if emb_mode == "cell":
             if cls_present:
@@ -170,45 +115,19 @@ def get_embs(
                 embs_list.append(mean_embs)
             elif summary_stat is not None:
                 # update tdigests with current batch for each emb dim
-                accumulate_tdigests(embs_tdigests, mean_embs, emb_dims)
-            del mean_embs
-        elif emb_mode == "gene":
-            if summary_stat is None:
-                embs_list.append(embs_i)
-            elif summary_stat is not None:
-                for h in trange(len(minibatch)):
-                    length_h = minibatch[h]["length"]
-                    input_ids_h = minibatch[h]["input_ids"][0:length_h]
+                # note: tdigest batch update known to be slow so updating serially
+                [
+                    embs_tdigests[j].update(mean_embs[i, j].item())
+                    for i in range(mean_embs.size(0))
+                    for j in range(emb_dims)
+                ]
 
-                    # double check dimensions before unsqueezing
-                    embs_i_dim = embs_i.dim()
-                    if embs_i_dim != 3:
-                        logger.error(
-                            f"Embedding tensor should have 3 dimensions, not {embs_i_dim}"
-                        )
-                        raise
-
-                    embs_h = embs_i[h, :, :].unsqueeze(dim=1)
-                    dict_h = dict(zip(input_ids_h, embs_h))
-                    for k in dict_h.keys():
-                        accumulate_tdigests(
-                            embs_tdigests_dict[int(k)], dict_h[k], emb_dims
-                        )
-                    del embs_h
-                    del dict_h
-        elif emb_mode == "cls":
-            cls_embs = embs_i[:, 0, :].clone().detach()  # CLS token layer
-            embs_list.append(cls_embs)
-            del cls_embs
-
-        overall_max_len = max(overall_max_len, max_len)
-        if not get_avg_attentions:
-            del outputs
+        del outputs
         del minibatch
         del input_data_minibatch
         del embs_i
-
-        torch.cuda.empty_cache()
+        del mean_embs
+        torch.cpu.empty_cache()
 
     if summary_stat is None:
         if (emb_mode == "cell") or (emb_mode == "cls"):
@@ -225,77 +144,25 @@ def get_embs(
 
     # calculate summary stat embs from approximated tdigests
     elif summary_stat is not None:
-        if emb_mode == "cell":
-            if summary_stat == "mean":
-                summary_emb_list = tdigest_mean(embs_tdigests, emb_dims)
-            elif summary_stat == "median":
-                summary_emb_list = tdigest_median(embs_tdigests, emb_dims)
-            embs_stack = torch.tensor(summary_emb_list)
-        elif emb_mode == "gene":
-            if summary_stat == "mean":
-                [
-                    update_tdigest_dict_mean(embs_tdigests_dict, gene, emb_dims)
-                    for gene in embs_tdigests_dict.keys()
-                ]
-            elif summary_stat == "median":
-                [
-                    update_tdigest_dict_median(embs_tdigests_dict, gene, emb_dims)
-                    for gene in embs_tdigests_dict.keys()
-                ]
-            return embs_tdigests_dict
-    if get_avg_attentions:
-        # Avoid division by zero
-        attention_counts = torch.clamp(attention_counts, min=1)
-        # Calculate the mean attention
-        avg_attentions = avg_attentions / attention_counts
-    else:
-        avg_attentions = None
-    return embs_stack, avg_attentions
+        if summary_stat == "mean":
+            summary_emb_list = [
+                embs_tdigests[i].trimmed_mean(0, 100) for i in range(emb_dims)
+            ]
+        elif summary_stat == "median":
+            summary_emb_list = [
+                embs_tdigests[i].percentile(50) for i in range(emb_dims)
+            ]
+        embs_stack = torch.tensor(summary_emb_list)
 
 
-def accumulate_tdigests(embs_tdigests, mean_embs, emb_dims):
-    # note: tdigest batch update known to be slow so updating serially
-    [
-        embs_tdigests[j].update(mean_embs[i, j].item())
-        for i in range(mean_embs.size(0))
-        for j in range(emb_dims)
-    ]
+
+def test_emb(model, example, layer_to_quant):
+    with torch.no_grad():
+        outputs = model(input_ids=example.to("cpu"))
 
 
-def update_tdigest_dict(embs_tdigests_dict, gene, gene_embs, emb_dims):
-    embs_tdigests_dict[gene] = accumulate_tdigests(
-        embs_tdigests_dict[gene], gene_embs, emb_dims
-    )
 
-
-def update_tdigest_dict_mean(embs_tdigests_dict, gene, emb_dims):
-    embs_tdigests_dict[gene] = tdigest_mean(embs_tdigests_dict[gene], emb_dims)
-
-
-def update_tdigest_dict_median(embs_tdigests_dict, gene, emb_dims):
-    embs_tdigests_dict[gene] = tdigest_median(embs_tdigests_dict[gene], emb_dims)
-
-
-def summarize_gene_embs(h, minibatch, embs_i, embs_tdigests_dict, emb_dims):
-    length_h = minibatch[h]["length"]
-    input_ids_h = minibatch[h]["input_ids"][0:length_h]
-    embs_h = embs_i[h, :, :].unsqueeze(dim=1)
-    dict_h = dict(zip(input_ids_h, embs_h))
-    [
-        update_tdigest_dict(embs_tdigests_dict, k, dict_h[k], emb_dims)
-        for k in dict_h.keys()
-    ]
-
-
-def tdigest_mean(embs_tdigests, emb_dims):
-    return [embs_tdigests[i].trimmed_mean(0, 100) for i in range(emb_dims)]
-
-
-def tdigest_median(embs_tdigests, emb_dims):
-    return [embs_tdigests[i].percentile(50) for i in range(emb_dims)]
-
-
-def label_cell_embs(embs, downsampled_data, emb_labels):
+def label_embs(embs, downsampled_data, emb_labels):
     embs_df = pd.DataFrame(embs.cpu().numpy())
     if emb_labels is not None:
         for label in emb_labels:
@@ -304,74 +171,27 @@ def label_cell_embs(embs, downsampled_data, emb_labels):
     return embs_df
 
 
-def label_gene_embs(embs, downsampled_data, token_gene_dict):
-    gene_set = {
-        element for sublist in downsampled_data["input_ids"] for element in sublist
-    }
-    gene_emb_dict = {k: [] for k in gene_set}
-    for i in range(embs.size()[0]):
-        length = downsampled_data[i]["length"]
-        dict_i = dict(
-            zip(
-                downsampled_data[i]["input_ids"][0:length],
-                embs[i, :, :].unsqueeze(dim=1),
-            )
-        )
-        for k in dict_i.keys():
-            gene_emb_dict[k].append(dict_i[k])
-    for k in gene_emb_dict.keys():
-        gene_emb_dict[k] = (
-            torch.squeeze(torch.mean(torch.stack(gene_emb_dict[k]), dim=0), dim=0)
-            .cpu()
-            .numpy()
-        )
-    embs_df = pd.DataFrame(gene_emb_dict).T
-    embs_df.index = [token_gene_dict[token] for token in embs_df.index]
-    return embs_df
-
-
-def plot_umap(embs_df, emb_dims, labels_clean, output_prefix, output_directory, kwargs_dict, seed=0):
+def plot_umap(embs_df, emb_dims, label, output_file, kwargs_dict):
     only_embs_df = embs_df.iloc[:, :emb_dims]
     only_embs_df.index = pd.RangeIndex(0, only_embs_df.shape[0], name=None).astype(str)
     only_embs_df.columns = pd.RangeIndex(0, only_embs_df.shape[1], name=None).astype(
         str
     )
     vars_dict = {"embs": only_embs_df.columns}
-    
-    obs_dict = {"cell_id": list(only_embs_df.index)}
-    for label_i in labels_clean:
-        obs_dict[label_i] = list(embs_df[label_i])
-
+    obs_dict = {"cell_id": list(only_embs_df.index), f"{label}": list(embs_df[label])}
     adata = anndata.AnnData(X=only_embs_df, obs=obs_dict, var=vars_dict)
     sc.tl.pca(adata, svd_solver="arpack")
-    sc.pp.neighbors(adata, random_state=seed)
-    sc.tl.umap(adata, random_state=seed)
+    sc.pp.neighbors(adata)
+    sc.tl.umap(adata)
     sns.set(rc={"figure.figsize": (10, 10)}, font_scale=2.3)
     sns.set_style("white")
-    default_kwargs_dict = {"size": 200}
+    default_kwargs_dict = {"palette": "Set2", "size": 200}
     if kwargs_dict is not None:
         default_kwargs_dict.update(kwargs_dict)
 
-    for label_i in labels_clean:
-        output_prefix_label = output_prefix + f"_umap_{label_i}"
-        output_file = (
-            Path(output_directory) / output_prefix_label
-        ).with_suffix(".pdf")
+    sc.pl.umap(adata, color=label, save=output_file, **default_kwargs_dict)
 
-        cats = set(embs_df[label_i])
 
-        with plt.rc_context():
-            ax = sc.pl.umap(adata, color=label_i, show=False, **default_kwargs_dict)
-            ax.legend(
-                markerscale=2,
-                frameon=False,
-                loc="center left",
-                bbox_to_anchor=(1, 0.5),
-                ncol=(1 if len(cats) <= 14 else 2 if len(cats) <= 30 else 3),
-            )
-            plt.show()
-            plt.savefig(output_file, bbox_inches="tight")
-    
 def gen_heatmap_class_colors(labels, df):
     pal = sns.cubehelix_palette(
         len(Counter(labels).keys()),
@@ -400,6 +220,13 @@ def make_colorbar(embs_df, label):
 
     cell_type_colors = gen_heatmap_class_colors(labels, embs_df)
     label_colors = pd.DataFrame(cell_type_colors, columns=[label])
+
+    for i, row in label_colors.iterrows():
+        colors = row[0]
+        if len(colors) != 3 or any(np.isnan(colors)):
+            print(i, colors)
+
+    label_colors.isna().sum()
 
     # create dictionary for colors and classes
     label_color_dict = gen_heatmap_class_dict(labels, label_colors[label])
@@ -438,15 +265,13 @@ def plot_heatmap(embs_df, emb_dims, label, output_file, kwargs_dict):
             0, 0, color=label_color_dict[label_color], label=label_color, linewidth=0
         )
 
-        g.ax_col_dendrogram.legend(
+        l1 = g.ax_col_dendrogram.legend(
             title=f"{label}",
             loc="lower center",
             ncol=4,
             bbox_to_anchor=(0.5, 1),
             facecolor="white",
         )
-    plt.show()
-    logger.info(f"Output file: {output_file}")
     plt.savefig(output_file, bbox_inches="tight")
 
 
@@ -454,7 +279,7 @@ class EmbExtractor:
     valid_option_dict = {
         "model_type": {"Pretrained", "GeneClassifier", "CellClassifier"},
         "num_classes": {int},
-        "emb_mode": {"cls", "cell", "gene"},
+        "emb_mode": {"cell", "gene"},
         "cell_emb_style": {"mean_pool"},
         "gene_emb_style": {"mean_pool"},
         "filter_data": {None, dict},
@@ -603,6 +428,14 @@ class EmbExtractor:
         self.pad_token_id = self.gene_token_dict.get("<pad>")
 
     def validate_options(self):
+        # first disallow options under development
+        if self.emb_mode == "gene":
+            logger.error(
+                "Extraction and plotting of gene-level embeddings currently under development. "
+                "Current valid option for 'emb_mode': 'cell'"
+            )
+            raise
+
         # confirm arguments are within valid options and compatible with each other
         for attr_name, valid_options in self.valid_option_dict.items():
             attr_value = self.__dict__[attr_name]
@@ -611,9 +444,7 @@ class EmbExtractor:
                     continue
             valid_type = False
             for option in valid_options:
-                if (option in [int, list, dict, bool, str]) and isinstance(
-                    attr_value, option
-                ):
+                if (option in [int, list, dict]) and isinstance(attr_value, option):
                     valid_type = True
                     break
             if valid_type:
@@ -626,13 +457,9 @@ class EmbExtractor:
 
         if self.filter_data is not None:
             for key, value in self.filter_data.items():
-                if not isinstance(value, list):
+                if type(value) != list:
                     self.filter_data[key] = [value]
-                    logger.warning(
-                        "Values in filter_data dict must be lists. "
-                        f"Changing {key} value to list ([{value}])."
                     )
-
     def extract_embs(
         self,
         model_directory,
@@ -923,9 +750,12 @@ class EmbExtractor:
                         f"Label {label} from labels_to_plot "
                         f"not present in provided embeddings dataframe."
                     )
-
-            labels_clean = [label for label in self.labels_to_plot if label in emb_labels] 
-            plot_umap(embs, emb_dims, labels_clean, output_prefix, output_directory, kwargs_dict)
+                    continue
+                output_prefix_label = "_" + output_prefix + f"_umap_{label}"
+                output_file = (
+                    Path(output_directory) / output_prefix_label
+                ).with_suffix(".pdf")
+                plot_umap(embs, emb_dims, label, output_prefix_label, kwargs_dict)
 
         if plot_style == "heatmap":
             for label in self.labels_to_plot:
