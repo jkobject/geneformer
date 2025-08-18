@@ -26,8 +26,9 @@ LARGE_INTEGER = int(
     1e20
 )  # This is used when we need something big but slightly smaller than VERY_LARGE_INTEGER
 
-# precollator functions
+warnings.filterwarnings("ignore", message="To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach()", category=UserWarning, module="torch")
 
+# precollator functions
 
 class ExplicitEnum(Enum):
     """
@@ -102,6 +103,9 @@ class PrecollatorForGeneAndCellClassification(SpecialTokensMixin):
     @property
     def pad_token_id(self):
         return self._pad_token_id
+
+    def save_pretrained(self, save_directory):
+        pass
 
     def _get_padding_truncation_strategies(
         self,
@@ -641,7 +645,8 @@ class DataCollatorForGeneClassification(DataCollatorForTokenClassification):
     def __call__(self, features):
         batch = self._prepare_batch(features)
 
-        batch = {k: torch.tensor(v, dtype=torch.int64) for k, v in batch.items()}
+        # batch = {k: torch.tensor(v, dtype=torch.int64) for k, v in batch.items()}
+        batch = {k: torch.tensor(v.clone().detach(), dtype=torch.int64) if isinstance(v, torch.Tensor) else torch.tensor(v, dtype=torch.int64) for k, v in batch.items()}
         return batch
 
 

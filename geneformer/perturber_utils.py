@@ -1,26 +1,19 @@
 import itertools as it
 import logging
+import os
 import pickle
 from collections import defaultdict
 from pathlib import Path
 from typing import List
 
+import datasets
 import numpy as np
 import pandas as pd
 import torch
 from datasets import Dataset, load_from_disk
 from peft import LoraConfig, get_peft_model
-from transformers import (
-    BertForMaskedLM,
-    BertForSequenceClassification,
-    BertForTokenClassification,
-    BitsAndBytesConfig,
-)
-
-GENE_MEDIAN_FILE = Path(__file__).parent / "gene_median_dictionary.pkl"
-TOKEN_DICTIONARY_FILE = Path(__file__).parent / "token_dictionary.pkl"
-ENSEMBL_DICTIONARY_FILE = Path(__file__).parent / "gene_name_id_dict.pkl"
-
+from transformers import (BertForMaskedLM, BertForSequenceClassification,
+                          BertForTokenClassification, BitsAndBytesConfig)
 
 logger = logging.getLogger(__name__)
 
@@ -113,15 +106,25 @@ def slice_by_inds_to_perturb(filtered_input_data, cell_inds_to_perturb):
 
 # load model to GPU
 def load_model(model_type, num_classes, model_directory, mode, quantize=False):
-    if model_type == "MTLCellClassifier-Quantized":
+    if model_type == "Pretrained-Quantized":
+        inference_only = True
+        model_type = "Pretrained"
+        quantize = True
+    elif model_type == "MTLCellClassifier-Quantized":
+        inference_only = True
         model_type = "MTLCellClassifier"
         quantize = True
+    else:
+        inference_only = False
 
     output_hidden_states = mode == "eval"
 
     # Quantization logic
-    if quantize:
-        if model_type == "MTLCellClassifier":
+    if isinstance(quantize, dict):
+        quantize_config = quantize.get("bnb_config", None)
+        peft_config = quantize.get("peft_config", None)
+    elif quantize:
+        if inference_only:
             quantize_config = BitsAndBytesConfig(load_in_8bit=True)
             peft_config = None
         else:
@@ -131,13 +134,22 @@ def load_model(model_type, num_classes, model_directory, mode, quantize=False):
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_compute_dtype=torch.bfloat16,
             )
-            peft_config = LoraConfig(
-                lora_alpha=128,
-                lora_dropout=0.1,
-                r=64,
-                bias="none",
-                task_type="TokenClassification",
-            )
+            try:
+                peft_config = LoraConfig(
+                    lora_alpha=128,
+                    lora_dropout=0.1,
+                    r=64,
+                    bias="none",
+                    task_type="TokenClassification", 
+                )
+            except ValueError as e:
+                peft_config = LoraConfig(
+                    lora_alpha=128,
+                    lora_dropout=0.1,
+                    r=64,
+                    bias="none",
+                    task_type="TOKEN_CLS",
+                )
     else:
         quantize_config = None
         peft_config = None
@@ -174,17 +186,31 @@ def load_model(model_type, num_classes, model_directory, mode, quantize=False):
         model.eval()
 
     # Handle device placement and PEFT
+    adapter_config_path = os.path.join(model_directory, "adapter_config.json")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if not quantize:
         # Only move non-quantized models
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = model.to(device)
+        move_to_cuda(model)
+    elif os.path.exists(adapter_config_path):
+        # If adapter files exist, load them into the model using PEFT's from_pretrained
+        model = PeftModel.from_pretrained(model, model_directory)
+        move_to_cuda(model)
+        print("loading lora weights")
     elif peft_config:
-        # Apply PEFT for quantized models (except MTLCellClassifier)
+        # Apply PEFT for quantized models (except MTLCellClassifier and CellClassifier-QuantInf)
         model.enable_input_require_grads()
         model = get_peft_model(model, peft_config)
+        move_to_cuda(model)
 
     return model
 
+def move_to_cuda(model):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # get what device model is currently on
+    model_device = next(model.parameters()).device
+    # Check if the model is on the CPU and move to cuda if necessary
+    if (model_device.type == "cpu") and (device.type == "cuda"):
+        model.to(device)
 
 def quant_layers(model):
     layer_nums = []
@@ -399,6 +425,11 @@ def remove_perturbed_indices_set(
 def make_perturbation_batch(
     example_cell, perturb_type, tokens_to_perturb, anchor_token, combo_lvl, num_proc
 ) -> tuple[Dataset, List[int]]:
+
+    # For datasets>=4.0.0, convert to dict to avoid format issues
+    if int(datasets.__version__.split(".")[0]) >= 4:
+        example_cell = example_cell[:]
+    
     if combo_lvl == 0 and tokens_to_perturb == "all":
         if perturb_type in ["overexpress", "activate"]:
             range_start = 1
@@ -872,49 +903,3 @@ def validate_cell_states_to_model(cell_states_to_model):
                 "'alt_states': ['hcm', 'other1', 'other2']}"
             )
             raise
-
-
-class GeneIdHandler:
-    def __init__(self, raise_errors=False):
-        def invert_dict(dict_obj):
-            return {v: k for k, v in dict_obj.items()}
-
-        self.raise_errors = raise_errors
-
-        with open(TOKEN_DICTIONARY_FILE, "rb") as f:
-            self.gene_token_dict = pickle.load(f)
-            self.token_gene_dict = invert_dict(self.gene_token_dict)
-
-        with open(ENSEMBL_DICTIONARY_FILE, "rb") as f:
-            self.id_gene_dict = pickle.load(f)
-            self.gene_id_dict = invert_dict(self.id_gene_dict)
-
-    def ens_to_token(self, ens_id):
-        if not self.raise_errors:
-            return self.gene_token_dict.get(ens_id, ens_id)
-        else:
-            return self.gene_token_dict[ens_id]
-
-    def token_to_ens(self, token):
-        if not self.raise_errors:
-            return self.token_gene_dict.get(token, token)
-        else:
-            return self.token_gene_dict[token]
-
-    def ens_to_symbol(self, ens_id):
-        if not self.raise_errors:
-            return self.gene_id_dict.get(ens_id, ens_id)
-        else:
-            return self.gene_id_dict[ens_id]
-
-    def symbol_to_ens(self, symbol):
-        if not self.raise_errors:
-            return self.id_gene_dict.get(symbol, symbol)
-        else:
-            return self.id_gene_dict[symbol]
-
-    def token_to_symbol(self, token):
-        return self.ens_to_symbol(self.token_to_ens(token))
-
-    def symbol_to_token(self, symbol):
-        return self.ens_to_token(self.symbol_to_ens(symbol))

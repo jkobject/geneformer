@@ -40,7 +40,7 @@ import pickle
 from collections import defaultdict
 
 import torch
-from datasets import Dataset, disable_progress_bars
+from datasets import Dataset
 from multiprocess import set_start_method
 from tqdm.auto import trange
 
@@ -48,7 +48,9 @@ from . import TOKEN_DICTIONARY_FILE
 from . import perturber_utils as pu
 from .emb_extractor import get_embs
 
-disable_progress_bars()
+import datasets
+datasets.logging.disable_progress_bar()
+
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ class InSilicoPerturber:
         "genes_to_perturb": {"all", list},
         "combos": {0, 1},
         "anchor_gene": {None, str},
-        "model_type": {"Pretrained", "GeneClassifier", "CellClassifier", "MTLCellClassifier", "MTLCellClassifier-Quantized"},
+        "model_type": {"Pretrained", "GeneClassifier", "CellClassifier", "MTLCellClassifier", "Pretrained-Quantized", "MTLCellClassifier-Quantized"},
         "num_classes": {int},
         "emb_mode": {"cls", "cell", "cls_and_gene", "cell_and_gene"},
         "cell_emb_style": {"mean_pool"},
@@ -70,6 +72,7 @@ class InSilicoPerturber:
         "max_ncells": {None, int},
         "cell_inds_to_perturb": {"all", dict},
         "emb_layer": {-1, 0},
+        "model_version": {"V1", "V2"},
         "token_dictionary_file": {None, str},
         "forward_batch_size": {int},
         "nproc": {int},
@@ -84,7 +87,7 @@ class InSilicoPerturber:
         anchor_gene=None,
         model_type="Pretrained",
         num_classes=0,
-        emb_mode="cell",
+        emb_mode="cls",
         cell_emb_style="mean_pool",
         filter_data=None,
         cell_states_to_model=None,
@@ -94,6 +97,7 @@ class InSilicoPerturber:
         emb_layer=-1,
         forward_batch_size=100,
         nproc=4,
+        model_version="V2",
         token_dictionary_file=None,
         clear_mem_ncells=1000,
     ):
@@ -130,7 +134,7 @@ class InSilicoPerturber:
             | ENSEMBL ID of gene to use as anchor in combination perturbations.
             | For example, if combos=1 and anchor_gene="ENSG00000148400":
             |     anchor gene will be perturbed in combination with each other gene.
-        model_type : {"Pretrained", "GeneClassifier", "CellClassifier", "MTLCellClassifier", "MTLCellClassifier-Quantized"}
+        model_type : {"Pretrained", "GeneClassifier", "CellClassifier", "MTLCellClassifier", "Pretrained-Quantized", "MTLCellClassifier-Quantized"}
             | Whether model is the pretrained Geneformer or a fine-tuned gene, cell, or multitask cell classifier (+/- 8bit quantization).
         num_classes : int
             | If model is a gene or cell classifier, specify number of classes it was trained to classify.
@@ -182,6 +186,9 @@ class InSilicoPerturber:
             | Batch size for forward pass.
         nproc : int
             | Number of CPU processes to use.
+        model_version : str
+            | To auto-select settings for model version other than current default.
+            | Current options: V1: models pretrained on ~30M cells, V2: models pretrained on ~104M cells
         token_dictionary_file : Path
             | Path to pickle file containing token dictionary (Ensembl ID:token).
         clear_mem_ncells : int
@@ -222,15 +229,30 @@ class InSilicoPerturber:
         self.emb_layer = emb_layer
         self.forward_batch_size = forward_batch_size
         self.nproc = nproc
+        self.model_version = model_version
         self.token_dictionary_file = token_dictionary_file
-        self.clear_mem_ncells = clear_mem_ncells
+        self.clear_mem_ncells = clear_mem_ncells             
 
         self.validate_options()
 
+        if self.model_version == "V1":
+            from . import TOKEN_DICTIONARY_FILE_30M
+            self.token_dictionary_file = TOKEN_DICTIONARY_FILE_30M
+            if self.emb_mode == "cls":
+                self.emb_mode = "cell"
+                logger.warning(
+                    "model_version selected as V1 so changing emb_mode from 'cls' to 'cell' as V1 models do not have a <cls> token."
+                )                
+            if self.emb_mode == "cls_and_gene":
+                self.emb_mode = "cell_and_gene"
+                logger.warning(
+                    "model_version selected as V1 so changing emb_mode from 'cls_and_gene' to 'cell_and_gene' as V1 models do not have a <cls> token."
+                )
+        
         # load token dictionary (Ensembl IDs:token)
         if self.token_dictionary_file is None:
-            token_dictionary_file = TOKEN_DICTIONARY_FILE
-        with open(token_dictionary_file, "rb") as f:
+            self.token_dictionary_file = TOKEN_DICTIONARY_FILE
+        with open(self.token_dictionary_file, "rb") as f:
             self.gene_token_dict = pickle.load(f)
         self.token_gene_dict = {v: k for k, v in self.gene_token_dict.items()}
 
@@ -794,6 +816,8 @@ class InSilicoPerturber:
             return example
 
         total_batch_length = len(filtered_input_data)
+
+    
         if self.cell_states_to_model is None:
             cos_sims_dict = defaultdict(list)
         else:
@@ -878,7 +902,7 @@ class InSilicoPerturber:
                         )
 
             ##### CLS and Gene Embedding Mode #####
-            elif self.emb_mode == "cls_and_gene":
+            elif self.emb_mode == "cls_and_gene":              
                 full_original_emb = get_embs(
                     model,
                     minibatch,
@@ -891,6 +915,7 @@ class InSilicoPerturber:
                     silent=True,
                 )
                 indices_to_perturb = perturbation_batch["perturb_index"]
+
                 # remove indices that were perturbed
                 original_emb = pu.remove_perturbed_indices_set(
                     full_original_emb,
@@ -899,6 +924,7 @@ class InSilicoPerturber:
                     self.tokens_to_perturb,
                     minibatch["length"],
                 )
+
                 full_perturbation_emb = get_embs(
                     model,
                     perturbation_batch,
@@ -910,7 +936,7 @@ class InSilicoPerturber:
                     summary_stat=None,
                     silent=True,
                 )
-
+    
                 # remove special tokens and padding
                 original_emb = original_emb[:, 1:-1, :]
                 if self.perturb_type == "overexpress":
@@ -921,9 +947,25 @@ class InSilicoPerturber:
                     perturbation_emb = full_perturbation_emb[
                         :, 1 : max(perturbation_batch["length"]) - 1, :
                     ]
-
+    
                 n_perturbation_genes = perturbation_emb.size()[1]
 
+                # truncate the original embedding as necessary
+                if self.perturb_type == "overexpress":
+                    def calc_perturbation_length(ids):
+                        if ids == [-100]:
+                            return 0
+                        else:
+                            return len(ids)
+
+                    max_tensor_size = max([length - calc_perturbation_length(ids) - 2 for length, ids in zip(minibatch["length"], indices_to_perturb)])
+
+                    max_n_overflow = max(minibatch["n_overflow"])
+                    if max_n_overflow > 0 and perturbation_emb.size()[1] < original_emb.size()[1]:
+                        original_emb = original_emb[:, 0 : perturbation_emb.size()[1], :]
+                    elif perturbation_emb.size()[1] < original_emb.size()[1]:
+                        original_emb = original_emb[:, 0:max_tensor_size, :]
+    
                 gene_cos_sims = pu.quant_cos_sims(
                     perturbation_emb,
                     original_emb,

@@ -29,7 +29,7 @@ Geneformer multi-task cell classifier.
 import logging
 import os
 
-from .mtl import eval_utils, train_utils, utils
+from .mtl import eval_utils, utils, train
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,9 @@ class MTLClassifier:
         "max_layers_to_freeze": {None, dict},
         "epochs": {None, int},
         "tensorboard_log_dir": {None, str},
-        "use_data_parallel": {None, bool},
+        "distributed_training": {None, bool},
+        "master_addr": {None, str},
+        "master_port": {None, str},
         "use_attention_pooling": {None, bool},
         "use_task_weights": {None, bool},
         "hyperparameters": {None, dict},
@@ -61,6 +63,7 @@ class MTLClassifier:
         "max_grad_norm": {None, int, float},
         "seed": {None, int},
         "trials_result_path": {None, str},
+        "gradient_accumulation_steps": {None, int},
     }
 
     def __init__(
@@ -79,7 +82,9 @@ class MTLClassifier:
         max_layers_to_freeze=None,
         epochs=1,
         tensorboard_log_dir="/results/tblogdir",
-        use_data_parallel=False,
+        distributed_training=False,
+        master_addr="localhost",
+        master_port="12355",
         use_attention_pooling=True,
         use_task_weights=True,
         hyperparameters=None,  # Default is None
@@ -89,6 +94,7 @@ class MTLClassifier:
         wandb_project=None,
         gradient_clipping=False,
         max_grad_norm=None,
+        gradient_accumulation_steps=1,  # Add this line with default value 1
         seed=42,  # Default seed value
     ):
         """
@@ -117,8 +123,12 @@ class MTLClassifier:
             | Path to directory to save results
         tensorboard_log_dir : None, str
             | Path to directory for Tensorboard logging results
-        use_data_parallel : None, bool
-            | Whether to use data parallelization
+        distributed_training : None, bool
+            | Whether to use distributed data parallel training across multiple GPUs
+        master_addr : None, str
+            | Master address for distributed training (default: localhost)
+        master_port : None, str
+            | Master port for distributed training (default: 12355)
         use_attention_pooling : None, bool
             | Whether to use attention pooling
         use_task_weights : None, bool
@@ -150,6 +160,8 @@ class MTLClassifier:
             | Whether to use gradient clipping
         max_grad_norm : None, int, float
             | Maximum norm for gradient clipping
+        gradient_accumulation_steps : None, int
+            | Number of steps to accumulate gradients before performing a backward/update pass
         seed : None, int
             | Random seed
         """
@@ -165,6 +177,7 @@ class MTLClassifier:
         self.batch_size = batch_size
         self.n_trials = n_trials
         self.study_name = study_name
+        self.gradient_accumulation_steps = gradient_accumulation_steps
 
         if max_layers_to_freeze is None:
             # Dynamically determine the range of layers to freeze
@@ -175,7 +188,9 @@ class MTLClassifier:
 
         self.epochs = epochs
         self.tensorboard_log_dir = tensorboard_log_dir
-        self.use_data_parallel = use_data_parallel
+        self.distributed_training = distributed_training
+        self.master_addr = master_addr
+        self.master_port = master_port
         self.use_attention_pooling = use_attention_pooling
         self.use_task_weights = use_task_weights
         self.hyperparameters = (
@@ -293,7 +308,7 @@ class MTLClassifier:
         self.config["manual_hyperparameters"] = self.manual_hyperparameters
         self.config["use_manual_hyperparameters"] = True
 
-        train_utils.run_manual_tuning(self.config)
+        train.run_manual_tuning(self.config)
 
     def validate_additional_options(self, req_var_dict):
         missing_variable = False
@@ -330,7 +345,7 @@ class MTLClassifier:
         req_var_dict = dict(zip(required_variable_names, required_variables))
         self.validate_additional_options(req_var_dict)
 
-        train_utils.run_optuna_study(self.config)
+        train.run_optuna_study(self.config)
 
     def load_and_evaluate_test_model(
         self,

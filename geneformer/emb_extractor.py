@@ -330,14 +330,18 @@ def label_gene_embs(embs, downsampled_data, token_gene_dict):
     return embs_df
 
 
-def plot_umap(embs_df, emb_dims, label, output_file, kwargs_dict, seed=0):
+def plot_umap(embs_df, emb_dims, labels_clean, output_prefix, output_directory, kwargs_dict, seed=0):
     only_embs_df = embs_df.iloc[:, :emb_dims]
     only_embs_df.index = pd.RangeIndex(0, only_embs_df.shape[0], name=None).astype(str)
     only_embs_df.columns = pd.RangeIndex(0, only_embs_df.shape[1], name=None).astype(
         str
     )
     vars_dict = {"embs": only_embs_df.columns}
-    obs_dict = {"cell_id": list(only_embs_df.index), f"{label}": list(embs_df[label])}
+    
+    obs_dict = {"cell_id": list(only_embs_df.index)}
+    for label_i in labels_clean:
+        obs_dict[label_i] = list(embs_df[label_i])
+
     adata = anndata.AnnData(X=only_embs_df, obs=obs_dict, var=vars_dict)
     sc.tl.pca(adata, svd_solver="arpack")
     sc.pp.neighbors(adata, random_state=seed)
@@ -348,21 +352,26 @@ def plot_umap(embs_df, emb_dims, label, output_file, kwargs_dict, seed=0):
     if kwargs_dict is not None:
         default_kwargs_dict.update(kwargs_dict)
 
-    cats = set(embs_df[label])
+    for label_i in labels_clean:
+        output_prefix_label = output_prefix + f"_umap_{label_i}"
+        output_file = (
+            Path(output_directory) / output_prefix_label
+        ).with_suffix(".pdf")
 
-    with plt.rc_context():
-        ax = sc.pl.umap(adata, color=label, show=False, **default_kwargs_dict)
-        ax.legend(
-            markerscale=2,
-            frameon=False,
-            loc="center left",
-            bbox_to_anchor=(1, 0.5),
-            ncol=(1 if len(cats) <= 14 else 2 if len(cats) <= 30 else 3),
-        )
-        plt.show()
-        plt.savefig(output_file, bbox_inches="tight")
+        cats = set(embs_df[label_i])
 
-
+        with plt.rc_context():
+            ax = sc.pl.umap(adata, color=label_i, show=False, **default_kwargs_dict)
+            ax.legend(
+                markerscale=2,
+                frameon=False,
+                loc="center left",
+                bbox_to_anchor=(1, 0.5),
+                ncol=(1 if len(cats) <= 14 else 2 if len(cats) <= 30 else 3),
+            )
+            plt.show()
+            plt.savefig(output_file, bbox_inches="tight")
+    
 def gen_heatmap_class_colors(labels, df):
     pal = sns.cubehelix_palette(
         len(Counter(labels).keys()),
@@ -454,6 +463,7 @@ class EmbExtractor:
         "emb_label": {None, list},
         "labels_to_plot": {None, list},
         "forward_batch_size": {int},
+        "model_version": {"V1", "V2"},
         "token_dictionary_file": {None, str},
         "nproc": {int},
         "summary_stat": {None, "mean", "median", "exact_mean", "exact_median"},
@@ -475,6 +485,7 @@ class EmbExtractor:
         forward_batch_size=100,
         nproc=4,
         summary_stat=None,
+        model_version="V2",
         token_dictionary_file=None,
         genelist=None,
     ):
@@ -483,8 +494,8 @@ class EmbExtractor:
 
         **Parameters:**
 
-        model_type : {"Pretrained", "GeneClassifier", "CellClassifier"}
-            | Whether model is the pretrained Geneformer or a fine-tuned gene or cell classifier.
+        model_type : {"Pretrained", "GeneClassifier", "CellClassifier", "Pretrained-Quantized"}
+            | Whether model is the pretrained Geneformer (full or quantized) or a fine-tuned gene or cell classifier.
         num_classes : int
             | If model is a gene or cell classifier, specify number of classes it was trained to classify.
             | For the pretrained Geneformer model, number of classes is 0 as it is not a classifier.
@@ -526,6 +537,9 @@ class EmbExtractor:
             | If mean or median, outputs only approximated mean or median embedding of input data.
             | Non-exact recommended if encountering memory constraints while generating goal embedding positions.
             | Non-exact is slower but more memory-efficient.
+        model_version : str
+            | To auto-select settings for model version other than current default.
+            | Current options: V1: models pretrained on ~30M cells, V2: models pretrained on ~104M cells
         token_dictionary_file : Path
             | Default is the Geneformer token dictionary
             | Path to pickle file containing token dictionary (Ensembl ID:token).
@@ -556,6 +570,7 @@ class EmbExtractor:
         self.emb_layer = emb_layer
         self.emb_label = emb_label
         self.labels_to_plot = labels_to_plot
+        self.model_version = model_version
         self.token_dictionary_file = token_dictionary_file
         self.forward_batch_size = forward_batch_size
         self.nproc = nproc
@@ -569,10 +584,19 @@ class EmbExtractor:
 
         self.validate_options()
 
+        if self.model_version == "V1":
+            from . import TOKEN_DICTIONARY_FILE_30M
+            self.token_dictionary_file = TOKEN_DICTIONARY_FILE_30M
+            if self.emb_mode == "cls":
+                self.emb_mode = "cell"
+                logger.warning(
+                    "model_version selected as V1 so changing emb_mode from 'cls' to 'cell' as V1 models do not have a <cls> token."
+                ) 
+
         # load token dictionary (Ensembl IDs:token)
         if self.token_dictionary_file is None:
-            token_dictionary_file = TOKEN_DICTIONARY_FILE
-        with open(token_dictionary_file, "rb") as f:
+            self.token_dictionary_file = TOKEN_DICTIONARY_FILE
+        with open(self.token_dictionary_file, "rb") as f:
             self.gene_token_dict = pickle.load(f)
 
         self.token_gene_dict = {v: k for k, v in self.gene_token_dict.items()}
@@ -652,6 +676,12 @@ class EmbExtractor:
         filtered_input_data = pu.load_and_filter(
             self.filter_data, self.nproc, input_data_file
         )
+
+        # Check to make sure that all the labels exist in the tokenized data:
+        if self.emb_label is not None:
+            for label in self.emb_label:
+                assert label in filtered_input_data.features.keys(), f"Attribute `{label}` not present in dataset features"
+
         if cell_state is not None:
             filtered_input_data = pu.filter_by_dict(
                 filtered_input_data, cell_state, self.nproc
@@ -697,14 +727,14 @@ class EmbExtractor:
             embs = embs.mean(dim=0)
             emb_dims = pu.get_model_emb_dims(model)
             embs_df = pd.DataFrame(
-                embs_df[0 : emb_dims - 1].mean(axis="rows"),
+                embs_df.iloc[:, 0 : emb_dims].mean(axis="rows"),
                 columns=[self.exact_summary_stat],
             ).T
         elif self.exact_summary_stat == "exact_median":
             embs = torch.median(embs, dim=0)[0]
             emb_dims = pu.get_model_emb_dims(model)
             embs_df = pd.DataFrame(
-                embs_df[0 : emb_dims - 1].median(axis="rows"),
+                embs_df.iloc[:, 0 : emb_dims].median(axis="rows"),
                 columns=[self.exact_summary_stat],
             ).T
 
@@ -893,12 +923,9 @@ class EmbExtractor:
                         f"Label {label} from labels_to_plot "
                         f"not present in provided embeddings dataframe."
                     )
-                    continue
-                output_prefix_label = output_prefix + f"_umap_{label}"
-                output_file = (
-                    Path(output_directory) / output_prefix_label
-                ).with_suffix(".pdf")
-                plot_umap(embs, emb_dims, label, output_file, kwargs_dict)
+
+            labels_clean = [label for label in self.labels_to_plot if label in emb_labels] 
+            plot_umap(embs, emb_dims, labels_clean, output_prefix, output_directory, kwargs_dict)
 
         if plot_style == "heatmap":
             for label in self.labels_to_plot:

@@ -676,6 +676,7 @@ class InSilicoPerturberStats:
         "anchor_gene": {None, str},
         "cell_states_to_model": {None, dict},
         "pickle_suffix": {None, str},
+        "model_version": {"V1", "V2"},
     }
 
     def __init__(
@@ -686,6 +687,7 @@ class InSilicoPerturberStats:
         anchor_gene=None,
         cell_states_to_model=None,
         pickle_suffix="_raw.pickle",
+        model_version="V2",
         token_dictionary_file=TOKEN_DICTIONARY_FILE,
         gene_name_id_dictionary_file=ENSEMBL_DICTIONARY_FILE,
     ):
@@ -713,7 +715,7 @@ class InSilicoPerturberStats:
             |    analyzes data for anchor gene perturbed in combination with each other gene.
             | However, if combos=0 and anchor_gene="ENSG00000136574":
             |    analyzes data for the effect of anchor gene's perturbation on the embedding of each other gene.
-        cell_states_to_model: None, dict
+        cell_states_to_model : None, dict
             | Cell states to model if testing perturbations that achieve goal state change.
             | Four-item dictionary with keys: state_key, start_state, goal_state, and alt_states
             | state_key: key specifying name of column in .dataset that defines the start/goal states
@@ -724,6 +726,9 @@ class InSilicoPerturberStats:
             |               "start_state": "dcm",
             |               "goal_state": "nf",
             |               "alt_states": ["hcm", "other1", "other2"]}
+        model_version : str
+            | To auto-select settings for model version other than current default.
+            | Current options: V1: models pretrained on ~30M cells, V2: models pretrained on ~104M cells
         token_dictionary_file : Path
             | Path to pickle file containing token dictionary (Ensembl ID:token).
         gene_name_id_dictionary_file : Path
@@ -736,8 +741,14 @@ class InSilicoPerturberStats:
         self.anchor_gene = anchor_gene
         self.cell_states_to_model = cell_states_to_model
         self.pickle_suffix = pickle_suffix
+        self.model_version = model_version
 
         self.validate_options()
+
+        if self.model_version == "V1":
+            from . import ENSEMBL_DICTIONARY_FILE_30M, TOKEN_DICTIONARY_FILE_30M
+            token_dictionary_file=TOKEN_DICTIONARY_FILE_30M
+            gene_name_id_dictionary_file=ENSEMBL_DICTIONARY_FILE_30M
 
         # load token dictionary (Ensembl IDs:token)
         with open(token_dictionary_file, "rb") as f:

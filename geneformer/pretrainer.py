@@ -8,13 +8,12 @@ import math
 import pickle
 import warnings
 from enum import Enum
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
 from datasets import Dataset
 from packaging import version
-from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.sampler import RandomSampler
 from transformers import (
     BatchEncoding,
@@ -24,11 +23,8 @@ from transformers import (
 )
 from transformers.file_utils import is_datasets_available, is_sagemaker_dp_enabled
 from transformers.trainer_pt_utils import (
-    DistributedLengthGroupedSampler,
-    DistributedSamplerWithLoop,
     LengthGroupedSampler,
 )
-from transformers.training_args import ParallelMode
 from transformers.utils import is_tf_available, is_torch_available, logging, to_py_obj
 from transformers.utils.generic import _is_tensorflow, _is_torch
 

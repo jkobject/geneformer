@@ -1,18 +1,15 @@
+import os
+import json
+import torch
 import pandas as pd
 
-from .imports import *  # noqa # isort:skip
-from .data import prepare_test_loader  # noqa # isort:skip
+from .data import prepare_test_loader
 from .model import GeneformerMultiTask
-
 
 def evaluate_test_dataset(model, device, test_loader, cell_id_mapping, config):
     task_pred_labels = {task_name: [] for task_name in config["task_names"]}
     task_pred_probs = {task_name: [] for task_name in config["task_names"]}
     cell_ids = []
-
-    # # Load task label mappings from pickle file
-    # with open(f"{config['results_dir']}/task_label_mappings.pkl", "rb") as f:
-    #     task_label_mappings = pickle.load(f)
 
     model.eval()
     with torch.no_grad():

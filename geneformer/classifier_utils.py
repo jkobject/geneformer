@@ -94,7 +94,7 @@ def remove_rare(data, rare_threshold, label, nproc):
     return data
 
 
-def label_classes(classifier, data, gene_class_dict, nproc):
+def label_classes(classifier, data, gene_class_dict, nproc, id_class_dict):
     if classifier == "cell":
         label_set = set(data["label"])
     elif classifier == "gene":
@@ -113,15 +113,24 @@ def label_classes(classifier, data, gene_class_dict, nproc):
             )
             raise
 
-    class_id_dict = dict(zip(label_set, [i for i in range(len(label_set))]))
-    id_class_dict = {v: k for k, v in class_id_dict.items()}
+    if id_class_dict is None:
+        class_id_dict = dict(zip(label_set, [i for i in range(len(label_set))]))
+        id_class_dict = {v: k for k, v in class_id_dict.items()}
+    else:
+        class_id_dict = {v: k for k, v in id_class_dict.items()}
+
+    if classifier == "gene":
+        inverse_gene_class_dict = {}
+        for key, value_list in gene_class_dict.items():
+            for value in value_list:
+                inverse_gene_class_dict[value] = key
 
     def classes_to_ids(example):
         if classifier == "cell":
             example["label"] = class_id_dict[example["label"]]
         elif classifier == "gene":
             example["labels"] = label_gene_classes(
-                example, class_id_dict, gene_class_dict
+                example, class_id_dict, inverse_gene_class_dict
             )
         return example
 
@@ -129,9 +138,9 @@ def label_classes(classifier, data, gene_class_dict, nproc):
     return data, id_class_dict
 
 
-def label_gene_classes(example, class_id_dict, gene_class_dict):
+def label_gene_classes(example, class_id_dict, inverse_gene_class_dict):
     return [
-        class_id_dict.get(gene_class_dict.get(token_id, -100), -100)
+        class_id_dict.get(inverse_gene_class_dict.get(token_id, -100), -100)
         for token_id in example["input_ids"]
     ]
 

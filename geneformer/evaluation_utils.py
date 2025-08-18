@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
+import datasets
 from datasets.utils.logging import disable_progress_bar, enable_progress_bar
 from sklearn import preprocessing
 from sklearn.metrics import (
@@ -20,19 +21,14 @@ from sklearn.metrics import (
 )
 from tqdm.auto import trange
 
-from . import TOKEN_DICTIONARY_FILE
 from .emb_extractor import make_colorbar
 
 logger = logging.getLogger(__name__)
 
 
-def preprocess_classifier_batch(cell_batch, max_len, label_name):
+def preprocess_classifier_batch(cell_batch, max_len, label_name, gene_token_dict):
     if max_len is None:
         max_len = max([len(i) for i in cell_batch["input_ids"]])
-
-    # load token dictionary (Ensembl IDs:token)
-    with open(TOKEN_DICTIONARY_FILE, "rb") as f:
-        gene_token_dict = pickle.load(f)
 
     def pad_label_example(example):
         example[label_name] = np.pad(
@@ -81,7 +77,7 @@ def py_softmax(vector):
     return e / e.sum()
 
 
-def classifier_predict(model, classifier_type, evalset, forward_batch_size):
+def classifier_predict(model, classifier_type, evalset, forward_batch_size, gene_token_dict):
     if classifier_type == "gene":
         label_name = "labels"
     elif classifier_type == "cell":
@@ -104,10 +100,14 @@ def classifier_predict(model, classifier_type, evalset, forward_batch_size):
         max_range = min(i + forward_batch_size, evalset_len)
         batch_evalset = evalset.select([i for i in range(i, max_range)])
         padded_batch = preprocess_classifier_batch(
-            batch_evalset, max_evalset_len, label_name
+            batch_evalset, max_evalset_len, label_name, gene_token_dict
         )
         padded_batch.set_format(type="torch")
 
+        # For datasets>=4.0.0, convert to dict to avoid format issues
+        if int(datasets.__version__.split(".")[0]) >= 4:
+            padded_batch = padded_batch[:]
+        
         input_data_batch = padded_batch["input_ids"]
         attn_msk_batch = padded_batch["attention_mask"]
         label_batch = padded_batch[label_name]
@@ -182,14 +182,18 @@ def plot_ROC(roc_metric_dict, model_style_dict, title, output_dir, output_prefix
     for model_name in roc_metric_dict.keys():
         mean_fpr = roc_metric_dict[model_name]["mean_fpr"]
         mean_tpr = roc_metric_dict[model_name]["mean_tpr"]
-        roc_auc = roc_metric_dict[model_name]["roc_auc"]
-        roc_auc_sd = roc_metric_dict[model_name]["roc_auc_sd"]
         color = model_style_dict[model_name]["color"]
         linestyle = model_style_dict[model_name]["linestyle"]
-        if len(roc_metric_dict[model_name]["all_roc_auc"]) > 1:
-            label = f"{model_name} (AUC {roc_auc:0.2f} $\pm$ {roc_auc_sd:0.2f})"
+        if "roc_auc" not in roc_metric_dict[model_name].keys():
+            all_roc_auc = roc_metric_dict[model_name]["all_roc_auc"]
+            label = f"{model_name} (AUC {all_roc_auc:0.2f})"
         else:
-            label = f"{model_name} (AUC {roc_auc:0.2f})"
+            roc_auc = roc_metric_dict[model_name]["roc_auc"]
+            roc_auc_sd = roc_metric_dict[model_name]["roc_auc_sd"]
+            if len(roc_metric_dict[model_name]["all_roc_auc"]) > 1:
+                label = f"{model_name} (AUC {roc_auc:0.2f} $\pm$ {roc_auc_sd:0.2f})"
+            else:
+                label = f"{model_name} (AUC {roc_auc:0.2f})"
         plt.plot(
             mean_fpr, mean_tpr, color=color, linestyle=linestyle, lw=lw, label=label
         )

@@ -48,11 +48,13 @@ import logging
 import os
 import pickle
 import subprocess
+from packaging.version import parse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import transformers
 from tqdm.auto import tqdm, trange
 from transformers import Trainer
 from transformers.training_args import TrainingArguments
@@ -71,6 +73,7 @@ sns.set()
 
 logger = logging.getLogger(__name__)
 
+transformers_version = parse(transformers.__version__)
 
 class Classifier:
     valid_option_dict = {
@@ -89,6 +92,7 @@ class Classifier:
         "no_eval": {bool},
         "stratify_splits_col": {None, str},
         "forward_batch_size": {int},
+        "model_version": {"V1", "V2"},
         "token_dictionary_file": {None, str},
         "nproc": {int},
         "ngpu": {int},
@@ -112,6 +116,7 @@ class Classifier:
         stratify_splits_col=None,
         no_eval=False,
         forward_batch_size=100,
+        model_version="V2",
         token_dictionary_file=None,
         nproc=4,
         ngpu=1,
@@ -188,6 +193,9 @@ class Classifier:
             | Otherwise, will perform eval during training.
         forward_batch_size : int
             | Batch size for forward pass (for evaluation, not training).
+        model_version : str
+            | To auto-select settings for model version other than current default.
+            | Current options: V1: models pretrained on ~30M cells, V2: models pretrained on ~104M cells
         token_dictionary_file : None, str
             | Default is to use token dictionary file from Geneformer
             | Otherwise, will load custom gene token dictionary.
@@ -222,14 +230,16 @@ class Classifier:
         self.stratify_splits_col = stratify_splits_col
         self.no_eval = no_eval
         self.forward_batch_size = forward_batch_size
+        self.model_version = model_version
         self.token_dictionary_file = token_dictionary_file
         self.nproc = nproc
         self.ngpu = ngpu
-
+        
         if self.training_args is None:
             logger.warning(
                 "Hyperparameter tuning is highly recommended for optimal results. "
-                "No training_args provided; using default hyperparameters."
+                "No training_args provided; using default hyperparameters. "
+                "Please note: these defaults are not recommended to be used uniformly across tasks."
             )
 
         self.validate_options()
@@ -244,7 +254,10 @@ class Classifier:
                 ] = self.cell_state_dict["states"]
 
         # load token dictionary (Ensembl IDs:token)
-        if self.token_dictionary_file is None:
+        if self.model_version == "V1":
+            from . import TOKEN_DICTIONARY_FILE_30M
+            self.token_dictionary_file = TOKEN_DICTIONARY_FILE_30M
+        elif self.token_dictionary_file is None:
             self.token_dictionary_file = TOKEN_DICTIONARY_FILE
         with open(self.token_dictionary_file, "rb") as f:
             self.gene_token_dict = pickle.load(f)
@@ -354,6 +367,7 @@ class Classifier:
         attr_to_balance=None,
         max_trials=100,
         pval_threshold=0.1,
+        id_class_dict_path=None,
     ):
         """
         Prepare data for cell state or gene classification.
@@ -396,6 +410,10 @@ class Classifier:
         pval_threshold : None, float
             | P-value threshold to use for attribute balancing across splits
             | E.g. if set to 0.1, will accept trial if p >= 0.1 for all attributes in attr_to_balance
+        id_class_dict_path : Path
+            | Path to *_id_class_dict.pkl from prior run of prepare_data to reuse for labeling new data
+            | Dictionary with keys being numeric class labels and values being original dataset class labels
+            | Note: only available for CellClassifiers
         """
 
         if test_size is None:
@@ -437,14 +455,25 @@ class Classifier:
             )
             # rename cell state column to "label"
             data = cu.rename_cols(data, self.cell_state_dict["state_key"])
+            
+            # convert classes to numerical labels and save as id_class_dict
+            if id_class_dict_path is not None:
+                with open(id_class_dict_path,"rb") as fp:
+                    id_class_dict = pickle.load(fp)
+            else:
+                id_class_dict = None
+            data, id_class_dict = cu.label_classes(
+                self.classifier, data, self.cell_state_dict, self.nproc, id_class_dict,
+            )
 
+        elif self.classifier == "gene":
         # convert classes to numerical labels and save as id_class_dict
         # of note, will label all genes in gene_class_dict
         # if (cross-)validating, genes will be relabeled in column "labels" for each split
         # at the time of training with Classifier.validate
-        data, id_class_dict = cu.label_classes(
-            self.classifier, data, self.gene_class_dict, self.nproc
-        )
+            data, id_class_dict = cu.label_classes(
+                self.classifier, data, self.gene_class_dict, self.nproc
+            )
 
         # save id_class_dict for future reference
         id_class_output_path = (
@@ -1056,6 +1085,8 @@ class Classifier:
         if eval_data is None:
             def_training_args["evaluation_strategy"] = "no"
             def_training_args["load_best_model_at_end"] = False
+        if transformers_version >= parse("4.46"):
+            def_training_args["eval_strategy"] = def_training_args.pop("evaluation_strategy")
         def_training_args.update(
             {"save_strategy": "epoch", "save_total_limit": 1}
         )  # only save last model for each run
@@ -1227,6 +1258,8 @@ class Classifier:
         if eval_data is None:
             def_training_args["evaluation_strategy"] = "no"
             def_training_args["load_best_model_at_end"] = False
+        if transformers_version >= parse("4.46"):
+            def_training_args["eval_strategy"] = def_training_args.pop("evaluation_strategy")
         training_args_init = TrainingArguments(**def_training_args)
 
         if self.freeze_layers is not None:
@@ -1306,7 +1339,7 @@ class Classifier:
         ##### Evaluate the model #####
         labels = id_class_dict.keys()
         y_pred, y_true, logits_list = eu.classifier_predict(
-            model, self.classifier, eval_data, self.forward_batch_size
+            model, self.classifier, eval_data, self.forward_batch_size, self.gene_token_dict
         )
         conf_mat, macro_f1, acc, roc_metrics = eu.get_metrics(
             y_pred, y_true, logits_list, num_classes, labels
